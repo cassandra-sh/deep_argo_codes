@@ -75,8 +75,8 @@ class Profile:
         #
         # Make interpolators 
         #
-        self.interp_psal = scipy.interpolate.interp1d(self.pressure, self.psal)
-        self.interp_temp = scipy.interpolate.interp1d(self.pressure, self.temperature)
+        self.interp_psal = scipy.interpolate.interp1d(self.pressure, self.psal, bounds_error=False)
+        self.interp_temp = scipy.interpolate.interp1d(self.pressure, self.temperature, bounds_error=False)
     
     def infer_values(self):
         """
@@ -89,6 +89,17 @@ class Profile:
                 pass
             else:
                 getattr(self, 'get_'+attr)()
+    
+    def make_interps(self):
+        """
+        Generate interpolators for every possible inferrable value
+        """
+        self.infer_values()
+        for attr in self.gen_attrlist:
+            setattr(self, attr+'_interp', 
+                    scipy.interpolate.interp1d(self.pressure, 
+                                               getattr(self, attr), 
+                                               bounds_error=False))
         
     def drop_nan(self):
         """
@@ -243,8 +254,8 @@ class Profile:
         CPcor_new = -1.1660E-7
         CTcor     =  3.2500E-6
 
-        a1 = (1.0 + CTcor*self.temperature + CPcor    *self.pressure)
-        b1 = (1.0 + CTcor*self.temperature + CPcor_new*self.pressure)
+        a1 = (1.0 + CTcor*np.array(self.temperature) + CPcor    *np.array(self.pressure))
+        b1 = (1.0 + CTcor*np.array(self.temperature) + CPcor_new*np.array(self.pressure))
         self.C_adj = self.C * a1 / b1
         return self.C_adj
 

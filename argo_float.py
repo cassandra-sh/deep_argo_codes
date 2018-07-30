@@ -13,8 +13,18 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.basemap import Basemap
 import sys
 import gc
+import os
 import numpy as np
 
+def ensure_dir(file_path):
+    """
+    Ensure directory exists
+    @author Parand via stackoverflow
+    """
+    directory = os.path.dirname(file_path)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+        
 def num_only(string):
     return "".join(_ for _ in string if _ in "1234567890")
 
@@ -23,56 +33,79 @@ class ArgoFloat:
     Contains all profiles for a given argo float, and an aviso interpolator
     clipped to the location of the float.
     """
-    def __init__(self, float_number, **kwargs):
+    def __init__(self, WMO_ID, **kwargs):
         """
         
         @params 
-            float_number
+            WMO_ID
         **kwargs
             argo_dir
             lim
             
         """
-        # Get files
-        self.argo_dir     = kwargs.get('argo_dir', "/data/argo_data/nc/")
-        self.float_number = float_number
-        obs_files = glob.glob(self.argo_dir+"*"+str(float_number)+"*.nc")
         
-        # Read files as argo profiles and get observation numbers
-        self.obs_nums = [int(num_only(f.split('_')[-1])) for f in obs_files]
-        self.profiles = [argo_profile.from_nc_ubu(f) for f in obs_files]
+        # STEP 1. GET THE PROFILES
         
-        # Sort by observation number
-        lim = kwargs.get('lim', 30)
-        self.profiles = [p for _,p in sorted(zip(self.obs_nums, self.profiles))][:lim]
-        self.obs_nums = sorted(self.obs_nums)[:lim]
+        self.argo_dir     = kwargs.get('argo_dir', "/data/argo_data/nc/")      # Get the directory
+        self.WMO_ID       = WMO_ID                                             # and using the float number
+        obs_files         = glob.glob(self.argo_dir+"*"+str(WMO_ID)+"*.nc")    # get all relevant files.
+        self.obs_nums = [int(num_only(f.split('_')[-1])) for f in obs_files]   # Get observation numbers from
+                                                                               # the file names.
+        obs_files = [f for _,f in sorted(zip(self.obs_nums, obs_files))]       # Sort by observation number.
+        self.obs_nums = sorted(self.obs_nums)                                
+        if self.obs_nums[0] == 0: obs_files.pop(0), self.obs_nums.pop(0)       # Get rid of 000 profiles
+        lim = kwargs.get('lim', 30)                                            # Get a number of profiles up 
+        obs_files = obs_files[:lim]                                            # to some limit
+        self.obs_nums = self.obs_nums[:lim]
+        self.profiles = [argo_profile.from_nc_ubu(f) for f in obs_files]       # Get the profiles themselves
+        self.julds    = [prof.get_julian_day() for prof in self.profiles]      # And associated julian days
         
-        # Get the first location
-        self.lon0 = self.profiles[0].longitude
-        self.lat0 = self.profiles[0].latitude
+        
+        # STEP 2. GET THE AVERAGE PROFILE
+        
+        # Get the average location
+        self.lon_avg = np.sum([prof.longitude for prof in self.profiles])/len(self.profiles)
+        self.lat_avg = np.sum([prof.latitude  for prof in self.profiles])/len(self.profiles)
         
         # Get the average P/T/S profile
         self.pres_avg = np.arange(0, 6000.05, 0.5)
-        psal_interps = [prof.interp_psal(self.pres_avg) for prof in self.profiles]
-        temp_interps = [prof.interp_temp(self.pres_avg) for prof in self.profiles]
-        self.psal_avg = np.sum(psal_interps, axis=1)/len(self.profiles)
-        self.temp_avg = np.sum(temp_interps, axis=1)/len(self.profiles)
+        psal_interps = np.array([prof.interp_psal(self.pres_avg) for prof in self.profiles])
+        temp_interps = np.array([prof.interp_temp(self.pres_avg) for prof in self.profiles])
+        
+        psal_avg = np.nanmean(psal_interps, axis=0)  # take the average of all interpolated
+        temp_avg = np.nanmean(temp_interps, axis=0)  # values which are NOT nan (the fill value)
+                                                     # i.e. where there IS data
+        
+        # Make the average profile object
+        self.prof_avg = argo_profile.Profile(temperature = temp_avg,
+                                             pressure    = self.pres_avg,
+                                             psal        = psal_avg,
+                                             longitude   = self.lon_avg,
+                                             latitude    = self.lat_avg)
+        
+        
+        # STEP 3. GET INTERPOLATORS
+        
+        # Make all profle interpolators
+        for prof in self.profiles:
+            prof.make_interps()
+        self.prof_avg.make_interps()
         
         # Get an aviso interpolator within a degree range of this location
-        self.AIbox = [self.lon0-10.0, self.lon0+10.0,
-                      self.lat0-10.0, self.lat0+10.0]
+        self.AIbox = [self.lon_avg-10.0, self.lon_avg+10.0,
+                      self.lat_avg-10.0, self.lat_avg+10.0]
         self.AI = aviso_interp.AvisoInterpolator(box=self.AIbox, irregular=False,
-                                                 limit=24, verbose=False)
+                                                 limit=64, verbose=False)
     
     
-    def aviso_plot(self, date, axis):
+    def aviso_map_plot(self, date, axis):
         """
         Plot the sea level anomaly for a given day on a given axis
         """
         # 1. Plot the basemap
         plt.sca(axis)
-        map = Basemap(llcrnrlat = self.lat0 - 10.0, urcrnrlat = self.lat0 + 10.0,
-                      llcrnrlon = self.lon0 - 10.0, urcrnrlon = self.lon0 + 10.0)
+        map = Basemap(llcrnrlat = self.lat_avg - 10.0, urcrnrlat = self.lat_avg + 10.0,
+                      llcrnrlon = self.lon_avg - 10.0, urcrnrlon = self.lon_avg + 10.0)
         map.drawmapboundary()
         map.fillcontinents()
         map.drawcoastlines()
@@ -89,11 +122,13 @@ class ArgoFloat:
         dd, la, lo = np.meshgrid(date, lats, lons, indexing='ij')  # Turn these into a grid
         vals = self.AI.interpolate(dd, la, lo)                     # Interpolate on the grid
         
+        
         # 3. Plot the sea level anomaly
         map.pcolor(lons, lats, vals[0], cmap='coolwarm',           
                    latlon=True, vmin=self.AI.min, vmax=self.AI.max)
         cbar = plt.colorbar(orientation='horizontal')
         cbar.set_label('Sea Level Anomaly (m)')
+        
         
         # 4. Return map
         return map
@@ -115,7 +150,24 @@ class ArgoFloat:
         
         This is relative to average SLA across all available float values
         """
-        pass      
+        # Compare this profile to the average and get the differential between
+        # potential temperature and absolute salinity
+        delta_pt = self.profiles[prof_index].pt_interp(self.pres_avg) - self.prof_avg.pt
+        delta_SA = self.profiles[prof_index].SA_interp(self.pres_avg) - self.prof_avg.SA
+        
+        # Get the average profile's beta and alpha values
+        beta  = self.prof_avg.beta
+        alpha = self.prof_avg.alpha
+        
+        # comprise integrand
+        integrand = alpha*delta_pt - beta*delta_SA  
+        
+        # Drop nan values - effectively only going as deep as the deepest measurement
+        int_pressure = self.pres_avg[~np.isnan(integrand)]
+        integrand = integrand[~np.isnan(integrand)]
+        
+        # Integrate
+        return np.trapz(integrand, x=int_pressure)  # integrate over pressure
         
         
     
@@ -158,24 +210,25 @@ class ArgoFloat:
         
         
         # AXIS 1 : Float Sea Level Anomaly vs. Time
-        ax1.plot(days, aviso_sla)                             # Plot the aviso SLA
-        ax1.plot(days, steric_sla)                            # Plot the steric SLA
+        ax1.plot(days, aviso_sla,  label='Aviso')             # Plot the aviso SLA
+        ax1.plot(days, steric_sla, label='Steric')            # Plot the steric SLA
         xticks = ax1.get_xticks()                             # Get the automatic xticks
         form = [argo_profile.format_jd(xt) for xt in xticks]  # Convert into formatted dates
         ax1.set_xticklabels(form, rotation=90)                # Use dates as tick labels
         ax1.grid(True)                                        # Add grid
+        ax1.legend(loc='lower right')                         # Add legend
         
         
         # AXIS 2 : Pressure vs. Temperature for floats
         for i in prof_indices:
-            ax2.scatter(self.profiles[i].pressure,            # Plot the P/T profiles
-                        self.profiles[i].temperature, s=1)    # Use very small markers
+            ax2.scatter(self.profiles[i].temperature,         # Plot the P/T profiles
+                        self.profiles[i].pressure, s=1)       # Use very small markers
         ax2.invert_yaxis()                                    # Invert pressure axis to descending
         ax2.grid(True)                                        # Add grid
         
         
         # AXIS 3 : Location over time
-        map = self.aviso_plot(days[-1], ax3)                  # Plot the interpolated SLA values
+        map = self.aviso_map_plot(days[-1], ax3)              # Plot the interpolated SLA values
         x, y = map(lons, lats)                                # Get map float locations
         map.plot(x,y, label='Float location', color='black')  # Plot float locations
         
@@ -187,197 +240,79 @@ class ArgoFloat:
         else:
             plt.show()
     
-    def plot_prof_all(self, savedir='/home/cassandra/docs/argo/movies/float/'):
+    def plot_prof_all(self,
+                      savedir='/home/cassandra/docs/argo/movies/float/all/',
+                      WMO_ID_dir=True):
         """
         Plot all of the profiles for this float
         """
+        # If float_num_dir, modify savedir for the float number
+        if WMO_ID_dir: savedir = savedir+str(self.WMO_ID)+'/'
+        
+        # Make the save directory if it does not exist
+        ensure_dir(savedir)
+        
+        # Get all indices and interate through them
         indices = list(range(1, len(self.profiles)))
         for i in indices:
-            print('Plotting index', i)
-            saveas = savedir+'f{:0>3d}.png'.format(i)
-            self.plot_profiles(prof_indices=indices[:i+1], saveas=saveas)
             
-    def plot_prof_relevant(self, savedir='/home/cassandra/docs/argo/movies/float/'):
+            # Report progress
+            print('Plotting index', i)
+            
+            # Plot profiles from beginning to this index
+            self.plot_profiles(prof_indices = indices[:i+1],
+                               saveas       = savedir+'f{:0>3d}.png'.format(i))
+            
+    def plot_prof_relevant(self,
+                           savedir='/home/cassandra/docs/argo/movies/float/rel/',
+                           WMO_ID_dir=True):
         """
         Plot all the profiles which have aviso data overlap
         """
-        pass
+        # If float_num_dir, modify savedir for the float number
+        if WMO_ID_dir: savedir = savedir+str(self.WMO_ID)+'/'
+        
+        # Make the save directory if it does not exist
+        ensure_dir(savedir)
+        
+        # Get the earliest and latest aviso days, for the range of interpolate-able values
+        earliest_day = min(self.AI.days)
+        latest_day   = max(self.AI.days)
+        
+        # Figure out where the profile data falls between these days
+        date_ok = np.logical_and(np.greater(self.julds, earliest_day),
+                                 np.less(self.julds, latest_day))
+        
+        # Get as list of acceptable profile indices
+        where_date_ok = np.where(date_ok)[0].tolist()
+        
+        # Get first valid date index
+        first = where_date_ok.pop(0)
+        
+        # Plan to use the acceptable indices as a slice of the array of possible
+        # indices, only plotting profiles from the first valid profile and up
+        indices = list(range(len(self.profiles)))
+        for i in where_date_ok:
+            indices_to_use = indices[first:i+1]
+            
+            # Report progress
+            print('WMO-ID', self.WMO_ID, 'Plotting', first, 'to', i)
+            sys.stdout.flush()
+            
+            # plot selected profiles
+            self.plot_profiles(prof_indices = indices_to_use, 
+                               saveas       = (savedir+'f{:0>3d}.png'.format(i)))
 
 
 
 
 def main():
     """
-    
-    """
-    float_number = 4902326
-    AF = ArgoFloat(float_number, argo_dir="/data/deep_argo_data/nc/", lim=26)
-    AF.plotrange()
+    Make movies for every deep argo float in the northwest atlantic
+    """    
+    for WMO_ID in [4902321, 4902322, 4902323, 4902324, 4902325, 4902326]:
+        ArgoFloat(WMO_ID, argo_dir="/data/deep_argo_data/nc/").plot_prof_relevant()
+        gc.collect()
         
 if __name__ == '__main__':
     main()
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-# display_map() - originally a test method 
-"""
-    def display_map(self, savedir='/home/cassandra/docs/argo/movies/float/'):
-        start_time = time.time()
-        
-        # Report code start
-        print("Starting code by prepping interp inputs. Time is " + str(int(time.time() - start_time)))
-        sys.stdout.flush()
-        
-        # Get a date range
-        jd = [prof.get_julian_day() for prof in self.profiles]
-        
-        # Get a range of lat/lon values
-        lons = np.arange(self.AIbox[0], self.AIbox[1], 0.05)
-        lats = np.arange(self.AIbox[2], self.AIbox[3], 0.05)
-        
-        # Fix the lons to be from 0 to 360
-        lons[lons<0] = lons[lons<0]+360
-        
-        # Turn these into a grid to interpolate on
-        dd, la, lo = np.meshgrid(jd, lats, lons, indexing='ij')
-        
-        # Report that we're about to interpolate
-        print("About to interpolate. Time is " + str(int(time.time() - start_time)))
-        sys.stdout.flush()
-        
-        # Get the interpolator sea level anomaly (sla) values for these points
-        vals = self.AI.interpolate(dd, la, lo)
-        
-        # Report done interpolating
-        print("Done interpolating. Time is " + str(int(time.time() - start_time)))
-        sys.stdout.flush()
-        
-        
-        # Get profile locations and sla values
-        prof_lats, prof_lons, prof_sla = [], [], []
-        for prof in self.profiles:
-            prof_lats.append(prof.latitude)
-            prof_lons.append(prof.longitude)
-            
-            lon = prof.longitude
-            if lon < 0: lon = lon + 360
-            
-            prof_sla.append(self.AI.interpolate(prof.get_julian_day(), prof.latitude, lon))
-        
-        
-        # Wait for user input
-        print("Ready to plot. Time is " + str(int(time.time() - start_time)))
-        sys.stdout.flush()
-        input('Press enter to plot:')
-                
-        # Report that we're about to plot
-        print("Plotting. Time is " + str(int(time.time() - start_time)))
-        sys.stdout.flush()
-        
-        # Get figure
-        f, (ax1, ax2, ax3) = plt.subplots(nrows=1, ncols=3)
-        
-        # Plot SLA stuff
-        plt.sca(ax1)
-        ax1.plot(jd[0], prof_sla[0])
-        ax1.set_xlabel('Julian Day')
-        ax1.set_ylabel("Sea Level Anomaly (m)")
-        
-        # Plot PT stuff 
-        plt.sca(ax2)
-        ax2.scatter(self.profiles[0].pressure, self.profiles[0].temperature, s=5)
-        ax2.set_ylabel("Pressure")
-        ax2.set_xlabel("Temperature (in-situ)")
-        ax2.invert_yaxis()
-        
-        # Prep a basemap to plot location on
-        plt.sca(ax3)
-        map = Basemap(llcrnrlat = prof_lats[0] - 30.0, urcrnrlat = prof_lats[0]  + 30.0,
-                      llcrnrlon = prof_lons[0]- 40.0, urcrnrlon = prof_lons[0] + 40.0)
-        map.drawmapboundary()
-        map.fillcontinents()
-        map.drawcoastlines()
-        parallels = np.arange(-80.,81,10.)
-        map.drawparallels(parallels, labels=[False, True, False, False])
-        meridians = np.arange(10.,351.,20.)
-        map.drawmeridians(meridians, labels=[False, False, False, True])
-        
-        
-        # Plot the sea level anomaly for the first time
-        valmin = np.nanmin(vals)
-        valmax = np.nanmax(vals)
-        map.pcolor(lons, lats, vals[0], cmap='coolwarm', latlon=True, 
-                   vmin=valmin, vmax=valmax)
-        
-        # Plot the float location for the first time
-        x, y = map(prof_lons[0], prof_lats[0])
-        map.plot(x,y, label='Float location')
-        
-        # Plot some information and colorbar
-        cbar = plt.colorbar(orientation='horizontal')
-        cbar.set_label('Sea Level Anomaly (m)')
-        plt.title(str(self.argo_dir + " float num " + str(self.float_number)))
-        mng = plt.get_current_fig_manager()
-        mng.window.showMaximized()
-        plt.tight_layout()
-        plt.show()
-        
-        # Wait 10 seconds for formatting plot, etc
-        print("Waiting to begin walk. Time is " + str(int(time.time() - start_time)))
-        sys.stdout.flush()
-        plt.pause(20)
-        
-        # Save image
-        f.savefig(savedir+'frame0.png')
-                
-        # In a loop, update the anomaly, the float location, wait a second, repeat
-        # also add the PT prof
-        for i in range(1, len(jd)):
-            # Report
-            print("Update num "+str(i)+"! Time is " + str(int(time.time() - start_time)))
-            sys.stdout.flush()
-            
-            # SLA stuff
-            plt.sca(ax1)
-            ax1.plot(jd[i-1:i+1], prof_sla[i-1:i+1], color='black')
-            
-            # PT stuff
-            plt.sca(ax2)
-            ax2.scatter(self.profiles[i].temperature, self.profiles[i].pressure, s=5, zorder=i)
-            
-            # BASEMAP stuf
-            plt.sca(ax3)
-            
-            # Plot the sea level anomaly for the interpolated area
-            map.pcolor(lons, lats, vals[i], cmap='coolwarm', latlon=True, zorder=i, 
-                       vmin=valmin, vmax=valmax)
-            
-            # Plot the float location
-            x, y = map(prof_lons[:i+1], prof_lats[:i+1])
-            map.plot(x,y, label='Float location', zorder=i+1)
-            
-            # Redraw boundaries and coastlines
-            map.drawmapboundary()
-            map.fillcontinents()
-            map.drawcoastlines()
-            parallels = np.arange(-80.,81,10.)
-            map.drawparallels(parallels, labels=[False, True, False, False])
-            meridians = np.arange(10.,351.,20.)
-            map.drawmeridians(meridians, labels=[False, False, False, True])
-            
-            # Save image
-            f.savefig(savedir+'frame'+str(i)+'.png')
-            
-            
-        
-        # Report end time
-        print("Done plotting! Time is " + str(int(time.time() - start_time)))
-        sys.stdout.flush()
-"""
