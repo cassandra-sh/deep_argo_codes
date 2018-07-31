@@ -171,7 +171,14 @@ class Profile:
                                             self.temperature,
                                             self.pressure)
         return self.CT
-
+    
+    
+    def get_z(self):
+        """
+        Get depth (in meters)
+        """
+        self.z = gsw.conversions.z_from_p(self.pressure, self.latitude)
+        return self.z
     
     def get_SR(self):
         """

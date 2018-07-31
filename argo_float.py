@@ -5,16 +5,21 @@ Created on Tue Jul 24 12:56:58 2018
 
 @author: cassandra
 """
-import argo_profile
+
+from mpl_toolkits.basemap  import Basemap
+from matplotlib            import rc
+from matplotlib.pyplot     import cm
+import matplotlib.gridspec as gridspec
+import matplotlib
+import matplotlib.pyplot   as plt
+import numpy               as np
 import aviso_interp
+import argo_profile
 import glob
 import time
-import matplotlib.pyplot as plt
-from mpl_toolkits.basemap import Basemap
 import sys
 import gc
 import os
-import numpy as np
 
 def ensure_dir(file_path):
     """
@@ -68,7 +73,7 @@ class ArgoFloat:
         self.lat_avg = np.sum([prof.latitude  for prof in self.profiles])/len(self.profiles)
         
         # Get the average P/T/S profile
-        self.pres_avg = np.arange(0, 6000.05, 0.5)
+        self.pres_avg = np.arange(0, 6001.0, 1.0)
         psal_interps = np.array([prof.interp_psal(self.pres_avg) for prof in self.profiles])
         temp_interps = np.array([prof.interp_temp(self.pres_avg) for prof in self.profiles])
         
@@ -82,6 +87,7 @@ class ArgoFloat:
                                              psal        = psal_avg,
                                              longitude   = self.lon_avg,
                                              latitude    = self.lat_avg)
+        self.depth_avg = -1.0*self.prof_avg.get_z()
         
         
         # STEP 3. GET INTERPOLATORS
@@ -143,7 +149,7 @@ class ArgoFloat:
         if lon < 0: lon = lon + 360
         return self.AI.interpolate(day, lat, lon)
     
-    def steric_sla(self, prof_index):
+    def steric_sla(self, prof_index, return_integrand=False):
         """
         Calculate steric sea level anomaly for the profile specified by the 
         given prof index.
@@ -163,11 +169,15 @@ class ArgoFloat:
         integrand = alpha*delta_pt - beta*delta_SA  
         
         # Drop nan values - effectively only going as deep as the deepest measurement
-        int_pressure = self.pres_avg[~np.isnan(integrand)]
+        int_depth = self.depth_avg[~np.isnan(integrand)]
         integrand = integrand[~np.isnan(integrand)]
         
-        # Integrate
-        return np.trapz(integrand, x=int_pressure)  # integrate over pressure
+        # Return integrand if desired
+        if return_integrand: 
+            return int_depth, integrand
+        
+        # Otherwise integrate
+        return np.trapz(integrand, x=int_depth)  # integrate over pressure
         
         
     
@@ -192,45 +202,186 @@ class ArgoFloat:
         if saveas != None:  plt.ioff()
         else:               plt.ion()
             
-        # Get figure and axes
-        f, (ax1, ax2, ax3) = plt.subplots(nrows=1, ncols=3, figsize=(12, 7))
-        
-        # Plot all axis labels, adjust size and shape for ~ok~ saved formatting
-        ax1.set_xlabel('Julian Day'), ax1.set_ylabel("Sea Level Anomaly (m)")
-        ax2.set_ylabel("Pressure"),   ax2.set_xlabel("Temperature (in-situ)")
-        plt.tight_layout(), plt.subplots_adjust(bottom=0.3, left=0.1)
-        
         # Get profiles information
         lats       = [self.profiles[i].latitude         for i in prof_indices]
         lons       = [self.profiles[i].longitude        for i in prof_indices]
-        days       = [self.profiles[i].get_julian_day() for i in prof_indices]
+        days       = [self.julds[i]                     for i in prof_indices]
         aviso_sla  = [self.aviso_sla(i)                 for i in prof_indices]
         steric_sla = [self.steric_sla(i)                for i in prof_indices]
         
+        # Make formatted strings for axis labels
+        rc('text', usetex=True)
+        rc('font', family='serif')
+        #steric_int_label = r"Steric Integrand ($\alpha \Delta T_{\textrm{potential}}}-\beta \Delta S_{{\textrm{absolute anomaly}}}$)"
+        steric_int_label = 'Steric Integrand'
         
         
-        # AXIS 1 : Float Sea Level Anomaly vs. Time
-        ax1.plot(days, aviso_sla,  label='Aviso')             # Plot the aviso SLA
-        ax1.plot(days, steric_sla, label='Steric')            # Plot the steric SLA
-        xticks = ax1.get_xticks()                             # Get the automatic xticks
-        form = [argo_profile.format_jd(xt) for xt in xticks]  # Convert into formatted dates
-        ax1.set_xticklabels(form, rotation=90)                # Use dates as tick labels
-        ax1.grid(True)                                        # Add grid
-        ax1.legend(loc='lower right')                         # Add legend
+        # Get a color scheme so that the latest profiles plotted are darker.
+        cmap = cm.get_cmap('binary')
+        norm = matplotlib.colors.PowerNorm(vmin=1, vmax=5, gamma=3.0, clip=True)
+        colors = [cmap(0.05+0.95*norm(i+1-len(prof_indices)+5)) for i in range(len(prof_indices))]
         
         
-        # AXIS 2 : Pressure vs. Temperature for floats
+        # Get figure and axes, label with WMO_id and latest date
+        f = plt.figure(figsize=(13,8))
+        gs = gridspec.GridSpec(6, 4, figure=f, wspace=0.35, hspace=0.6)
+        
+        map_ax = plt.subplot(gs[ :-3   ,  0])
+        SLA_ax = plt.subplot(gs[3:     ,  0])
+        
+        top_integrand_ax = plt.subplot(gs[0:2  ,  1])
+        mid_integrand_ax = plt.subplot(gs[2:4  ,  1])
+        low_integrand_ax = plt.subplot(gs[4:6  ,  1])
+        
+        upper_PT_ax = plt.subplot(gs[0:2   ,  2])
+        lower_PT_ax = plt.subplot(gs[2:  ,  2])
+        
+        upper_PSA_ax = plt.subplot(gs[0:2   ,  3])
+        lower_PSA_ax = plt.subplot(gs[2:  ,  3])
+        
+        plt.suptitle("Float WMO\_ID: " + str(self.WMO_ID) + ", " +
+                     "Latest day: "   + argo_profile.format_jd(self.julds[prof_indices[-1]]))
+        
+        
+        
+        # Plot all axis labels, adjust size and shape for ~ok~ saved formatting
+        SLA_ax.set_xlabel('Julian Day (days)')
+        SLA_ax.set_ylabel("Sea Level Anomaly (m)")
+        
+        low_integrand_ax.set_xlabel(steric_int_label)
+        mid_integrand_ax.set_ylabel("Depth (m)")
+        
+        lower_PT_ax.set_xlabel("In-situ temperature (C)")
+        lower_PT_ax.set_ylabel("Pressure (dbar)")
+        
+        lower_PSA_ax.set_xlabel("Absolute Salinity (g/kg)")
+        lower_PSA_ax.set_ylabel("Pressure (dbar)")
+        
+        plt.tight_layout()
+        plt.subplots_adjust(bottom=0.2, left=0.1, top=0.92)
+        
+        
+        
+        # MAP axis : Location over time
+        map = self.aviso_map_plot(days[-1], map_ax)              # Plot the interpolated SLA values
+        x, y = map(lons, lats)                                   # Get map float locations
+        map.plot(x,y, label='Float location', color='black')     # Plot float locations
+        
+        
+        # SLA_ax : Float Sea Level Anomaly vs. Time
+        SLA_ax.plot(days, aviso_sla,  label='Aviso')             # Plot the aviso SLA
+        SLA_ax.plot(days, steric_sla, label='Steric')            # Plot the steric SLA
+        xticks = SLA_ax.get_xticks()                             # Get the automatic xticks
+        form = [argo_profile.format_jd(xt) for xt in xticks]     # Convert into formatted dates
+        SLA_ax.set_xticklabels(form, rotation=90)                # Use dates as tick labels
+        SLA_ax.grid(True)                                        # Add grid
+        SLA_ax.legend(loc='lower right')                         # Add legend
+        
+        
+        
+        
+        # AXIS : Integrand axes
+
+        # top_integrand_ax
+        top_integrand_ax.axvline( .0001, color='crimson')
+        top_integrand_ax.axvline(-.0001, color='crimson')
         for i in prof_indices:
-            ax2.scatter(self.profiles[i].temperature,         # Plot the P/T profiles
-                        self.profiles[i].pressure, s=1)       # Use very small markers
-        ax2.invert_yaxis()                                    # Invert pressure axis to descending
-        ax2.grid(True)                                        # Add grid
+            # Get the x and y values of the integrand and plot
+            int_depth, integrand = self.steric_sla(i, return_integrand=True)  
+            top_integrand_ax.plot(integrand, int_depth, color=colors[i])
+        top_integrand_ax.invert_yaxis()
+        top_integrand_ax.grid(True)
+        top_integrand_ax.set_ylim([200, 0])
+        
+        plt.sca(top_integrand_ax)
+        plt.xticks(rotation=20)
+        
+        # mid_integrand_ax
+        mid_integrand_ax.axvline( .00005, color='crimson')
+        mid_integrand_ax.axvline(-.00005, color='crimson')
+        for i in prof_indices:
+            # Get the x and y values of the integrand and plot
+            int_depth, integrand = self.steric_sla(i, return_integrand=True)  
+            mid_integrand_ax.plot(integrand, int_depth, color=colors[i])
+        mid_integrand_ax.invert_yaxis()
+        mid_integrand_ax.grid(True)
+        mid_integrand_ax.set_ylim([1500,     200])
+        mid_integrand_ax.set_xlim([ -.0001, .0001])
+        
+        plt.sca(mid_integrand_ax)
+        plt.xticks(rotation=20)
+        
+        # low_integrand_ax
+        for i in prof_indices:
+            # Get the x and y values of the integrand and plot
+            int_depth, integrand = self.steric_sla(i, return_integrand=True)  
+            low_integrand_ax.plot(integrand, int_depth, color=colors[i])
+        low_integrand_ax.invert_yaxis()
+        low_integrand_ax.grid(True)
+        low_integrand_ax.set_ylim([6000, 1500])
+        low_integrand_ax.set_xlim([ -.00005, .00005])
+        
+        plt.sca(low_integrand_ax)
+        plt.xticks(rotation=20)
         
         
-        # AXIS 3 : Location over time
-        map = self.aviso_map_plot(days[-1], ax3)              # Plot the interpolated SLA values
-        x, y = map(lons, lats)                                # Get map float locations
-        map.plot(x,y, label='Float location', color='black')  # Plot float locations
+        
+        
+        # AXIS: Pressure vs. Temperature
+        
+        # AXIS : upper_PT_ax : Pressure vs. Temperature for floats [low res]
+        upper_PT_ax.axvline(1, color='crimson')
+        upper_PT_ax.axvline(4, color='crimson')
+        for i in prof_indices:
+            upper_PT_ax.scatter(self.profiles[i].temperature,         # Plot the P/T profiles
+                        self.profiles[i].pressure, s=1, color=colors[i])
+        upper_PT_ax.invert_yaxis()                                    # Invert pressure axis to descending
+        upper_PT_ax.grid(True)                                        # Add grid
+        upper_PT_ax.set_ylim([2000, 0])                               # Zoom in on shallow part
+        upper_PT_ax.yaxis.tick_right()
+        
+        
+        # AXIS : lower_PT_ax : Pressure vs. Temperature for floats [high res]
+        for i in prof_indices:
+            lower_PT_ax.scatter(self.profiles[i].temperature,         # Plot the P/T profiles
+                        self.profiles[i].pressure, s=1, color=colors[i])    
+        lower_PT_ax.invert_yaxis()                                    # Invert pressure axis to descending
+        lower_PT_ax.grid(True)                                        # Add grid
+        lower_PT_ax.set_ylim([6000, 2000])                            # Zoom in on deep part
+        lower_PT_ax.set_xlim([1, 4])                                  # Increase resolution
+        lower_PT_ax.yaxis.tick_right()
+        lower_PT_ax.yaxis.set_label_position("right")
+        
+        
+        
+        
+        
+        # AXIS: Pressure versus Absolute Salinity
+        
+        # AXIS : upper_PSA_ax : Pressure vs. absolute salinity for floats [low res]
+        upper_PSA_ax.axvline(34.666, color='crimson')
+        upper_PSA_ax.axvline(35.333, color='crimson')
+        for i in prof_indices:
+            upper_PSA_ax.scatter(self.profiles[i].SA,         # Plot the P/T profiles
+                                self.profiles[i].pressure, s=1, color=colors[i])
+        upper_PSA_ax.invert_yaxis()                                    # Invert pressure axis to descending
+        upper_PSA_ax.grid(True)                                        # Add grid
+        upper_PSA_ax.set_ylim([2000, 0])                               # Zoom in on shallow part
+        upper_PSA_ax.yaxis.tick_right()
+        
+        
+        
+        # AXIS : lower_PSA_ax : Pressure vs. absolute salinity for floats [high res]
+        for i in prof_indices:
+            lower_PSA_ax.scatter(self.profiles[i].SA,         # Plot the P/T profiles
+                                self.profiles[i].pressure, s=1, color=colors[i])    
+        lower_PSA_ax.invert_yaxis()                                    # Invert pressure axis to descending
+        lower_PSA_ax.grid(True)                                        # Add grid
+        lower_PSA_ax.set_ylim([6000, 2000])                            # Zoom in on deep part
+        lower_PSA_ax.set_xlim([34.666, 35.333])                          # Increase resolution
+        lower_PSA_ax.yaxis.tick_right()
+        lower_PSA_ax.yaxis.set_label_position("right")
+        
         
         
         # Save and close if desired
