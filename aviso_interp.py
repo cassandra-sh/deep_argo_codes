@@ -114,6 +114,8 @@ class AvisoInterpolator:
             irregular - 
             limit     -
             box       - [lower lon, upper lon, lower lat, upper lat]
+            units     - 'm' or 'cm' - the units of the nc files used
+                        interpolated values will ALWAYS be in meters.
         """
         verbose = kwargs.get('verbose', True)
         load = kwargs.get('load', False)
@@ -143,8 +145,10 @@ class AvisoInterpolator:
                 self.lons = lon
                 self.lats = lat
             
-            
             mats = np.array([x for _,x in sorted(zip(self.days,mats))])
+            if kwargs.get('units', 'm') == 'cm':
+                mats = mats/100.0  #CONVERT FROM CM TO M
+                
             self.days = np.array(sorted(self.days))
             n_nan =  len(np.where(np.isnan(mats.flatten()))[0])
             
