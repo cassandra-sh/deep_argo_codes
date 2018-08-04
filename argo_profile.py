@@ -29,7 +29,23 @@ def format_jd(jd):
     Gotta convert from julian day after 1950.01.01
     """
     return astropy.time.Time(jd+REF_TIME.jd, format='jd').datetime.strftime("%d %B %Y")
-            
+
+UNIT_DICT = {'SA'            : 'Absolute Salinity (g/kg)',
+             'C'             : 'Conductivity',
+             'pt'            : 'Potential Temperature (C)',
+             'CT'            : 'Conservative Temperature (C)',
+             'alpha'         : 'Alpha',
+             'beta'          : 'Beta',
+             'C_adj'         : 'Adjusted Conductivity',
+             'alpha_on_beta' : 'Alpha / Beta',
+             'SR'            : 'Reference Salinity',
+             'z'             : 'Depth (m)',
+             'integrand'     : 'Steric integrand (unitless)'}
+    
+def attr_to_name(attr):
+    return UNIT_DICT[attr]
+
+
 class Profile:
     """
     Profile object stores information from an argo float profile, and can
@@ -53,7 +69,7 @@ class Profile:
         """
         
         self.gen_attrlist = ['SA', 'C', 'pt', 'CT', 'C_adj', 'beta', 'alpha',
-                             'alpha_on_beta', 'SR']
+                             'alpha_on_beta', 'SR', 'z', 'integrand']
         self.list_attrlist = ['pressure', 'psal', 'temperature']
         self.single_attrlist = ['observation_number', 'float_number',
                                 'datetime', 'julian_day','latitude', 'longitude']
@@ -151,6 +167,17 @@ class Profile:
                                            self.pressure)
         return self.C
     
+    def get_integrand(self):
+        """
+        Get the Steric Sea Level anomaly integrand
+        """
+        for attr in ['pt', 'SA', 'beta', 'alpha']:
+            if not hasattr(self, attr):
+                getattr(self, 'get_'+attr)()
+        self.integrand = self.alpha * self.pt - self.beta * self.SA
+        return self.integrand
+        
+    
     def get_SA(self):
         """
         Get the absolute salinity
@@ -171,7 +198,6 @@ class Profile:
                                             self.temperature,
                                             self.pressure)
         return self.CT
-    
     
     def get_z(self):
         """

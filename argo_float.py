@@ -11,6 +11,7 @@ from matplotlib            import rc
 from matplotlib.pyplot     import cm
 import matplotlib.gridspec as gridspec
 import matplotlib
+import scipy.interpolate
 import matplotlib.pyplot   as plt
 import numpy               as np
 import aviso_interp
@@ -66,8 +67,10 @@ class ArgoFloat:
       
         # STEP 2. GET THE AVERAGE PROFILE
         # Get the average location
-        self.lon_avg = np.sum([prof.longitude for prof in self.profiles])/len(self.profiles)
-        self.lat_avg = np.sum([prof.latitude  for prof in self.profiles])/len(self.profiles)
+        self.lons = [prof.longitude for prof in self.profiles]
+        self.lats = [prof.latitude  for prof in self.profiles]
+        self.lon_avg = np.sum(self.lons)/len(self.profiles)
+        self.lat_avg = np.sum(self.lats)/len(self.profiles)
         # Get the average P/T/S profile
         self.pres_avg = np.arange(0, 6001.0, 1.0)
         psal_interps = np.array([prof.interp_psal(self.pres_avg) for prof in self.profiles])
@@ -96,7 +99,30 @@ class ArgoFloat:
                                                  limit=100, verbose=False,
                                                  aviso_dir = aviso_dir,
                                                  units = 'm')
+        # Make time profile interpolators
+        temps = np.array([prof.interp_temp(self.pres_avg) for prof in self.profiles])
+        psals = np.array([prof.interp_psal(self.pres_avg) for prof in self.profiles])
+        self.temp_interp = scipy.interpolate.RegularGridInterpolator((self.julds, self.pres_avg), 
+                                                                     temps, 
+                                                                     fill_value=np.nan, 
+                                                                     bounds_error=False)
+        self.psal_interp = scipy.interpolate.RegularGridInterpolator((self.julds, self.pres_avg), 
+                                                                     psals, 
+                                                                     fill_value=np.nan, 
+                                                                     bounds_error=False)
+        self.lon_interp = scipy.interpolate.interp1d(self.julds, self.lons, fill_value=np.nan, bounds_error=False)
+        self.lat_interp = scipy.interpolate.interp1d(self.julds, self.lats, fill_value=np.nan, bounds_error=False)
     
+    def day_profile(self, day):
+        """
+        Interpolate from the set of argo profiles a new profile for a given day
+        on the track of available argo profiles. 
+        """
+        return argo_profile.Profile(temperature = self.temp_interp((day, self.pres_avg)),
+                                    pressure    = self.pres_avg,
+                                    psal        = self.psal_interp((day, self.pres_avg)),
+                                    longitude   = self.lon_interp(day),
+                                    latitude    = self.lat_interp(day))
     
     def aviso_map_plot(self, date, axis):
         """
@@ -536,7 +562,16 @@ class ArgoFloat:
             # Plot profiles from beginning to this index
             self.plot_profiles(prof_indices = indices[:i+1],
                                saveas       = savedir+'f{:0>3d}.png'.format(i))
-            
+    
+    def match_days(self):
+        earliest_day = min(self.AI.days)
+        latest_day   = max(self.AI.days)
+        date_ok = np.logical_and(np.greater(self.julds, earliest_day),
+                                 np.less(self.julds, latest_day))
+        where_date_ok = np.where(date_ok)[0].tolist()
+        return [self.julds[i] for i in where_date_ok]
+        
+    
     def plot_prof_relevant(self, deltas = False,
                            savedir='/home/cassandra/docs/argo/movies/float/rel_weekly/',
                            WMO_ID_dir=True):
