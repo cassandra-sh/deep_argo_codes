@@ -43,7 +43,7 @@ UNIT_DICT = {'SA'            : 'Absolute Salinity (g/kg)',
              'integrand'     : 'Steric integrand (unitless)'}
     
 def attr_to_name(attr):
-    return UNIT_DICT[attr]
+    return UNIT_DICT.get(attr, attr)
 
 
 class Profile:
@@ -93,6 +93,11 @@ class Profile:
         #
         self.interp_psal = scipy.interpolate.interp1d(self.pressure, self.psal, bounds_error=False)
         self.interp_temp = scipy.interpolate.interp1d(self.pressure, self.temperature, bounds_error=False)
+        
+        #
+        # Infer values and make interps
+        #
+        self.make_interps()
     
     def infer_values(self):
         """
