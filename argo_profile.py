@@ -22,6 +22,15 @@ import aviso_interp
 
 REF_TIME = astropy.time.Time('1950-01-01')
 
+def is_between(value, pair):
+    """
+    Figure out if a value is between two values in the pair, given that the
+    pair may not be in order
+    """
+    if   value > pair[0] and value < pair[1]: return True
+    elif value < pair[0] and value > pair[1]: return True
+    else:                                     return False
+
 def format_jd(jd):
     """
     Give a string representation of the day
@@ -41,9 +50,26 @@ UNIT_DICT = {'SA'            : 'Absolute Salinity (g/kg)',
              'SR'            : 'Reference Salinity',
              'z'             : 'Depth (m)',
              'integrand'     : 'Steric integrand (unitless)'}
+ 
+
+SYMB_DICT = {'SA'            : 'SA',
+             'C'             : 'Conductivity',
+             'pt'            : r'$\theta$',
+             'CT'            : 'Conservative Temperature (C)',
+             'alpha'         : r'$\alpha$',
+             'beta'          : r'$\beta$',
+             'C_adj'         : 'Adjusted Conductivity',
+             'alpha_on_beta' : r'$\frac{\alpha}{\beta}$',
+             'SR'            : 'Reference Salinity',
+             'z'             : 'z',
+             'integrand'     : 'int'}
     
+   
 def attr_to_name(attr):
     return UNIT_DICT.get(attr, attr)
+   
+def attr_to_symb(attr):
+    return SYMB_DICT.get(attr, attr)
 
 
 class Profile:
@@ -99,6 +125,79 @@ class Profile:
         #
         self.make_interps()
     
+    def depth_param(self, param, value):
+        """
+        Given a param and a value of that param, return the [lower] depth
+        associated with that param value. Nan if the value is never crossed.
+        """
+        pval = getattr(self, param)[-1]
+        zval = self.z[-1]
+        for z, p in zip(reversed(self.z), reversed(getattr(self, param))):
+            if np.isnan(p) or np.isnan(pval): pass
+            elif value < pval and value > p: return np.interp(value, [pval, p], [zval, z])
+            elif value > pval and value < p: return np.interp(value, [pval, p], [zval, z])
+            pval, zval = p, z
+        return np.nan
+    
+    def find_matches(self, given_param, given_value, other_param):
+        """
+        Given one parameter and value, figure out what another pameter's value
+        would be for that measurement.
+        
+        Returns a list [potentially length 1] of valid values, because most
+        parameter measurements are not one-to-one. Requires some algorithm
+        after the fact to pick the most appropriate one. 
+        
+        @params
+            given_param - Param of starting value
+            given_value - Starting value
+            other_param - Other param to figure out value of
+        
+        @returns
+            list, ordered from least to most deep, of matching (interpolated)
+            other_param values
+        """
+        gvals, ovals = getattr(self, given_param), getattr(self, other_param)
+        valid_values = []
+        for i in range(1, len(self.pressure)):
+            if is_between(given_value, gvals[i-1:i+1]):
+                interp_oval = np.interp(given_value, gvals[i-1:i+1], ovals[i-1:i+1])
+                valid_values.append(interp_oval)
+        return valid_values
+    
+    def grid_param(self, gridded, interpd, n=1000):
+        """
+        Project one parameter onto a grid of another parameter.
+        
+        ArgoProfile handles data on an uneven pressure grid, interpolating by
+        pressure. If you want to get evenly spaced data, you would input an 
+        even pressure grid to the parameter interpolator objects. 
+        
+        Here, instead, a given param (gridded) is taken as a grid, and
+        another param  (interpd) is projected onto that grid
+        
+        CHOSEN PARAMS MUST BE ONE-TO-ONE or else this won't work. 
+        
+        @params
+            gridded - param name to put onto grid
+            interpd - param name to get values of for each grid value
+            n       - number of positions in the evenly spaced grid
+                      default is 1000
+            
+        @returns
+            grid, vals
+            
+            grid - grid positions, evenly spaced
+            vals - value at each grid position
+        """
+        gridded_param_values = getattr(self, gridded)
+        interpd_param_values = getattr(self, interpd)
+        
+        grid = np.linspace(min(gridded_param_values), max(gridded_param_values), n)
+        vals = np.interp(grid, gridded_param_values, interpd_param_values)
+        
+        return grid, vals
+    
     def infer_values(self):
         """
         Generate every possible inferrable value
@@ -121,6 +220,9 @@ class Profile:
                     scipy.interpolate.interp1d(self.pressure, 
                                                getattr(self, attr), 
                                                bounds_error=False))
+        self.depth_to_pressure = scipy.interpolate.interp1d(getattr(self, 'z'),
+                                                            self.pressure, 
+                                                            bounds_error=False)
         
     def drop_nan(self):
         """
@@ -163,6 +265,7 @@ class Profile:
         return format_jd(self.get_julian_day())
     
     
+    
     def get_C(self):
         """
         Get the conductivity
@@ -180,8 +283,7 @@ class Profile:
             if not hasattr(self, attr):
                 getattr(self, 'get_'+attr)()
         self.integrand = self.alpha * self.pt - self.beta * self.SA
-        return self.integrand
-        
+        return self.integrand  
     
     def get_SA(self):
         """
@@ -269,7 +371,6 @@ class Profile:
             
         self.pt = gsw.conversions.pt_from_CT(self.SA, self.CT)
         return self.pt
-    
     
     def get_C_adj(self):
         """
@@ -394,14 +495,13 @@ def get_argo_files_ubu(deep=False, natlantic=False):
             
     return floats
        
-
 def main(fign=1, deep=True, atlantic=False, recent=True):
     """
     Load and plot a single profile, given any requested requirements
     
     @params
         fign - figure number to pass to figure. Vary if plotting multiple plots
-               at once
+                at once
                
     @params/requirements
         deep - whether or not to use deep argo
@@ -410,8 +510,6 @@ def main(fign=1, deep=True, atlantic=False, recent=True):
                    given float (not a guarantee that the measurement will be 
                    recent to present day)
     """
-    
-    
     #
     # get a dictionary of all the argo profiles
     #

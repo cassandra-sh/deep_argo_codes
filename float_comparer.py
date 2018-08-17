@@ -16,6 +16,8 @@ import matplotlib.pyplot   as     plt
 from matplotlib.pyplot     import cm
 from matplotlib            import rc
 from mpl_toolkits.basemap  import Basemap
+import matplotlib.patheffects as PathEffects
+import matplotlib.patches as mpatches
 
 class FloatComparer:
     """
@@ -52,9 +54,10 @@ class FloatComparer:
         if float_colors is not None:
             self.float_colors = float_colors
         else:
-            #color=iter(cm.rainbow(np.linspace(0,1,self.n_floats)))
-            #self.float_colors = [next(color) for _ in range(self.n_floats)]
-            self.float_colors = ['black' for _ in range(self.n_floats)]
+            color=iter(cm.rainbow(np.linspace(0,1,self.n_floats)))
+            self.float_colors = [next(color) for _ in range(self.n_floats)]
+            #self.float_colors = ['white' for _ in range(self.n_floats)]
+        self.float_colors=['red', 'green', 'blue']
             
         # Get minimum and maximum lons and lats for the aviso interp object
         self.max_lon = np.nanmax(np.nanmax([argofloat.lons for argofloat in self.floats]))
@@ -78,6 +81,21 @@ class FloatComparer:
         Return all days, sorted, which have aviso data and at least one argo float's data
         """
         return sorted(list(set().union(*[argofloat.match_days() for argofloat in self.floats])))
+    
+    def all_match_day_range(self):
+        min_max = max(self.floats[0].match_days())
+        max_min = min(self.floats[0].match_days())
+        
+        for argofloat in self.floats:
+            days = argofloat.match_days()
+            
+            if min_max > max(days):
+                min_max = max(days)
+            
+            if max_min < min(days):
+                max_min = min(days)
+        
+        return max_min, min_max
 
 
     def aviso_map_plot(self, axis, date, hspace=10.0, vspace=10.0, extracolors='black'):
@@ -115,11 +133,13 @@ class FloatComparer:
         
         # 3. Plot the sea level anomaly
         map.pcolor(lons, lats, vals[0], cmap='coolwarm',           
-                   latlon=True, vmin=self.AI.min, vmax=self.AI.max)
+                   latlon=True, vmin=self.AI.min, vmax=self.AI.max, zorder=1)
         cbar = plt.colorbar()
         cbar.set_label('Sea Level Anomaly (m)')
         
         return map
+    
+    
     
     
     def full_map_plot(self, axis, day_range, hspace=13.0, vspace=3.0, extracolors='black'):
@@ -154,11 +174,84 @@ class FloatComparer:
             map.scatter(x[-1], y[-1], color=self.float_colors[i], s=5, zorder=3)
             
             # c. Label each float by wmo_id
-            axis.text(x[-1], y[-1], str(self.wmo_ids[i]), color='black', fontsize=8, rotation=20)
+            axis.text(x[-1], y[-1], str(self.wmo_ids[i]), fontsize=8, rotation=20, color='black', zorder=4)
         
         return map
     
     
+    def plot_isotherms_together(self, day_range=None, saveas=None, contour_levels=[ 1.52, 1.65, 1.82]):
+        # Plan not to display if saving, by turning interactive mode off (or on if planning to show)
+        if saveas != None:  plt.ioff()
+        else:               plt.ion()
+
+        
+        #contour_levels = list(np.arange(1.50, 1.90, 0.02))
+        #contour_levels=[ 1.52, 1.54, 1.56, 1.58, 1.60]#, 1.65, 1.82]
+        
+        # Format plot text
+        rc('text', usetex=True)
+        rc('font', family='serif')
+        plt.style.use('dark_background')
+        
+        # Generate day range if needed. Format to sorted just in case.
+        if day_range is None:
+            min_day, max_day = self.all_match_day_range()
+            day_range = np.linspace(min_day, max_day, 27*(max_day-min_day)/365)
+        day_range = sorted(day_range)
+        
+        # Pre figure and axis
+        f = plt.figure(figsize=(13,8))
+        gs = gridspec.GridSpec(2, 1, figure=f)
+        map_axis = plt.subplot(gs[0, :])
+        
+        self.full_map_plot(map_axis, day_range, extracolors='white')
+        
+        axis = plt.subplot(gs[1, :])
+        patches = []
+        for j in range(self.n_floats):
+            prof_indices = self.floats[j].profs_to_date(day_range[-1])
+            
+            xvals = np.array([self.floats[j].julds[i] for i in prof_indices])
+            
+            depthvals = np.array([self.floats[j].profiles[i].z_interp(self.floats[j].pres_range) for i in prof_indices])
+            yvals = np.nanmean(depthvals, axis=0)
+            
+            zvals = np.array([self.floats[j].profiles[i].pt_interp(self.floats[j].pres_range) for i in prof_indices]).T
+            cs = axis.contour(xvals, yvals, zvals,
+                              levels=sorted(contour_levels),
+                              colors=self.float_colors[j],
+                              extent=[np.nanmin(xvals), np.nanmax(xvals),
+                                      np.nanmin(yvals), np.nanmax(yvals)],
+                              vmax = max(contour_levels)+1,
+                              vmin = min(contour_levels)-1)
+            clabels = plt.clabel(cs, color=self.float_colors[j])        
+            patches.append(mpatches.Patch(color=self.float_colors[j], 
+                                          label=r'Float WMO\_ID: ' + str(self.wmo_ids[j])))
+            for l in clabels:
+                l.set_rotation(0)
+                l.set_path_effects([PathEffects.withStroke(linewidth=2, foreground='k')])
+            
+        axis.set_xlim(np.nanmin(xvals), np.nanmax(xvals))    
+        axis.set_ylim(-5200, -4200)
+                
+        xticks = axis.get_xticks() 
+        form = [ap.format_jd(xt) for xt in xticks]     # Convert into formatted dates
+        axis.set_xticklabels(form, rotation=90)
+        
+        
+        plt.legend(handles=patches)
+        plt.subplots_adjust(top=0.96,bottom=0.2,left=0.055,right=0.96,hspace=0.36,wspace=0.32)
+        plt.suptitle("Latest day: "   + ap.format_jd(day_range[-1]))
+        
+        
+        # Save and close if desired
+        if saveas != None:
+            f.savefig(saveas)
+            plt.close(f)
+        else:
+            plt.show()
+            
+         
     def plot_profiles_compare(self, day_range, saveas=None):
         """
         Mostly hardcoded plot routine for comparing potential temperature 
@@ -197,12 +290,12 @@ class FloatComparer:
         sts, sms, sbs = [], [], []
         for i in range(self.n_floats):
             prof_indices = self.floats[i].profs_to_date(day_range[-1])
-            st = self.floats[i].axplot_prof(float_tops[i], prof_indices, 'seasonal', 'pt', 'SA',
-                                            cbar=False, ax_xlims = [18, 30], ax_ylims=[36.5, 38])
-            sm = self.floats[i].axplot_prof(float_mids[i], prof_indices, 'seasonal', 'pt', 'SA',
-                                            cbar=False, ax_xlims = [0,  30], ax_ylims=[34.5, 38])
-            sb = self.floats[i].axplot_prof(float_bots[i], prof_indices, 'seasonal', 'pt', 'SA',
-                                            cbar=False, ax_xlims = [0, 10], ax_ylims=[34.75, 35.5])
+            st = self.floats[i].axplot_prof(float_tops[i], prof_indices, 'seasonal', 'SA', 'pt',
+                                            cbar=False, ax_ylims = [18, 30], ax_xlims=[36.5, 38])
+            sm = self.floats[i].axplot_prof(float_mids[i], prof_indices, 'seasonal', 'SA', 'pt',
+                                            cbar=False, ax_ylims = [0,  30], ax_xlims=[34.5, 38])
+            sb = self.floats[i].axplot_prof(float_bots[i], prof_indices, 'seasonal', 'SA', 'pt',
+                                            cbar=False, ax_ylims = [1.5,  3], ax_xlims=[35.0, 35.15])
             sts.append(st)
             sms.append(sm)
             sbs.append(sb)
@@ -283,17 +376,22 @@ class FloatComparer:
         
         # Step 2: Plot the profiles
         sts, sms, sbs = [], [], []
+        stsls, smsls, sbsls = [], [], []
         for i in range(self.n_floats):
             prof_indices = self.floats[i].profs_to_date(day_range[-1])
-            st = self.floats[i].axplot_prof(float_tops[i], prof_indices, 'isotherms', 'time', 'z',
-                                            vmin=0, vmax=30, cbar=False, ax_ylims=[-500,  0    ])
-            sm = self.floats[i].axplot_prof(float_mids[i], prof_indices, 'isotherms', 'time', 'z',
-                                            vmin=0, vmax=30, cbar=False, ax_ylims=[-2000, -500 ])
-            sb = self.floats[i].axplot_prof(float_bots[i], prof_indices, 'isotherms', 'time', 'z',
-                                            vmin=0, vmax=30, cbar=False, ax_ylims=[-6000, -2000])
+            st, stsl = self.floats[i].axplot_prof(float_tops[i], prof_indices, 'isotherms', 'time', 'z',
+                                                  vmin=0, vmax=30, cbar=False, ax_ylims=[-500,  0    ])
+            sm, smsl = self.floats[i].axplot_prof(float_mids[i], prof_indices, 'isotherms', 'time', 'z',
+                                                  vmin=0, vmax=30, cbar=False, ax_ylims=[-2000, -500 ])
+            sb, sbsl = self.floats[i].axplot_prof(float_bots[i], prof_indices, 'isotherms', 'time', 'z',
+                                                  vmin=0, vmax=30, cbar=False, ax_ylims=[-6000, -2000])
             sts.append(st)
             sms.append(sm)
             sbs.append(sb)
+            
+            stsls.append(stsl)
+            smsls.append(smsl)
+            sbsls.append(sbsl)
             
             # Drop x ticks on top and mid axes
             float_mids[i].get_xaxis().set_ticks([])
@@ -319,6 +417,7 @@ class FloatComparer:
         # Step 3: Add a colorbar
         cbar = f.colorbar(sbs[-1], ax=np.ravel([float_tops, float_mids, float_bots]).flatten())
         cbar.set_label('Potential Temperature (C)', rotation=270, labelpad=15)
+        cbar.add_lines(sbsls[-1])
         
         # Save and close if desired
         if saveas != None:
@@ -505,7 +604,7 @@ class FloatComparer:
         af.ensure_dir(savedir)
         day_range = self.any_match_days()
         day_range = np.linspace(min(day_range), max(day_range),
-                                64*(max(day_range) - min(day_range))/365, dtype=int)
+                                26*(max(day_range) - min(day_range))/365, dtype=int)
         if iso and not profs:
             af.ensure_dir(savedir+'isotherms/')
             for i in range(1, len(day_range)):
@@ -549,13 +648,15 @@ class FloatComparer:
             
 def main():
     wmo_ids = [4902326, 4902324, 4902323, 4902322, 4902321]
+    wmo_ids = [4902324, 4902323, 4902322]
     
     comparer = FloatComparer(wmo_ids, 
                              argo_dir="/data/deep_argo_data/nc/",
                              aviso_dir = '/data/aviso_data/nrt/weekly/')
     
-    comparer.comps_over_time()
+    comparer.plot_isotherms_together()
     
+    #comparer.comps_over_time()
     #comparer.plot_over_time( 0, 5500, 'pt', param2='SA')
     
     #comparer.plot_over_time( 750, 1250, 'pt')
