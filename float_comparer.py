@@ -57,7 +57,7 @@ class FloatComparer:
             color=iter(cm.rainbow(np.linspace(0,1,self.n_floats)))
             self.float_colors = [next(color) for _ in range(self.n_floats)]
             #self.float_colors = ['white' for _ in range(self.n_floats)]
-        self.float_colors=['red', 'green', 'blue']
+        self.float_colors=['red', 'green', 'blue', 'yellow']
             
         # Get minimum and maximum lons and lats for the aviso interp object
         self.max_lon = np.nanmax(np.nanmax([argofloat.lons for argofloat in self.floats]))
@@ -67,7 +67,7 @@ class FloatComparer:
         self.min_lat = np.nanmin(np.nanmin([argofloat.lats for argofloat in self.floats]))
         
         # Make AvisoInterpolator object
-        hspace = kwargs.get('hspace', 10.0)
+        hspace = kwargs.get('hspace', 18.0)
         vspace = kwargs.get('vspace', 10.0)
         self.AIbox = [self.min_lon-hspace, self.max_lon+hspace,
                       self.min_lat-vspace, self.max_lat+vspace]
@@ -98,7 +98,7 @@ class FloatComparer:
         return max_min, min_max
 
 
-    def aviso_map_plot(self, axis, date, hspace=10.0, vspace=10.0, extracolors='black'):
+    def aviso_map_plot(self, axis, date, hspace=16.0, vspace=10.0, extracolors='black'):
         """
         Plot a basemap to the given axis to display all the aviso data for this
         collection of floats, on the given day. Return the Basemap object.
@@ -132,15 +132,12 @@ class FloatComparer:
         vals = self.AI.interpolate(dd, la, lo)                     # Interpolate on the grid
         
         # 3. Plot the sea level anomaly
-        map.pcolor(lons, lats, vals[0], cmap='coolwarm',           
-                   latlon=True, vmin=self.AI.min, vmax=self.AI.max, zorder=1)
-        cbar = plt.colorbar()
-        cbar.set_label('Sea Level Anomaly (m)')
+        #map.pcolor(lons, lats, vals[0], cmap='coolwarm',           
+        #           latlon=True, vmin=self.AI.min, vmax=self.AI.max, zorder=1)
+        #cbar = plt.colorbar()
+        #cbar.set_label('Sea Level Anomaly (m)')
         
         return map
-    
-    
-    
     
     def full_map_plot(self, axis, day_range, hspace=13.0, vspace=3.0, extracolors='black'):
         """
@@ -171,12 +168,102 @@ class FloatComparer:
             
             # b. Plot, emphasizing the latest position as a colored dot
             map.plot(x, y, color='black', zorder=2)
-            map.scatter(x[-1], y[-1], color=self.float_colors[i], s=5, zorder=3)
+            map.scatter(x[-1], y[-1]+2, color='black', s=15, zorder=3)
             
             # c. Label each float by wmo_id
-            axis.text(x[-1], y[-1], str(self.wmo_ids[i]), fontsize=8, rotation=20, color='black', zorder=4)
+            xt, yt = map(self.floats[i].lon_interp(day_range), self.floats[i].lat_interp(day_range)+4.0)
+            axis.text(xt[-1], yt[-1], str(self.wmo_ids[i]), fontsize=18, rotation=30, color='black', zorder=4)
         
         return map
+    
+    
+    def plot_map_only(self, day_range=None, saveas=None):
+        """
+        x axis: longitude
+        y axis: heave
+        z axis: time (darkest = recent past, lightest = distant past)
+        
+        day_range: up to given date
+        plots: heave signals for each *profile* at the location measured
+        
+        maybe eventually fit some kind of curve but it depends what it looks 
+        like and what kind of prior we can put on deep mode wave speed and
+        wavenumber
+        """
+        matplotlib.rcParams.update(matplotlib.rcParamsDefault)
+        rc('text', usetex=True)
+        rc('font', family='serif', size=24)
+        
+        if day_range is None:
+            min_day, max_day = self.all_match_day_range()
+            day_range = np.linspace(min_day, max_day, 27*(max_day-min_day)/365)
+        day_range = sorted(day_range)
+        
+        f = plt.figure()
+        map_axis = plt.subplot()
+        self.full_map_plot(map_axis, day_range[:1], extracolors='black',
+                           hspace=14, vspace=7)
+        
+        if saveas != None:
+            f.savefig(saveas)
+            plt.close(f)
+        else:
+            plt.show()
+    
+    def plot_heave_longitude(self, day_range=None, saveas=None):
+        """
+        x axis: longitude
+        y axis: heave
+        z axis: time (darkest = recent past, lightest = distant past)
+        
+        day_range: up to given date
+        plots: heave signals for each *profile* at the location measured
+        
+        maybe eventually fit some kind of curve but it depends what it looks 
+        like and what kind of prior we can put on deep mode wave speed and
+        wavenumber
+        """
+        
+        #1. For each Float, get the isopycnals and the means and standard deviations
+        #   of the heave signal
+        
+        #2. Determine what data points will be plotted based on the day range
+        
+        #3. Color based on how many days have passed since the latest day
+        
+        #4. Plot
+    
+    def plot_bathymetry_position(self, day_range=None, saveas=None):
+        """
+        
+        """
+        # Generate day range if needed. Format to sorted just in case.
+        if day_range is None:
+            min_day, max_day = self.all_match_day_range()
+            day_range = np.linspace(min_day, max_day, 27*(max_day-min_day)/365)
+        day_range = sorted(day_range)
+        # Format matplotlib as desired
+        matplotlib.rcParams.update(matplotlib.rcParamsDefault)
+        rc('text', usetex=True)
+        rc('font', family='serif', size=18)
+        # PREPARE AXES    
+        f = plt.figure(figsize=(13,8))
+        gs = gridspec.GridSpec(2, self.n_floats, figure=f)
+        map_axis = plt.subplot(gs[ 0, : ])
+        self.full_map_plot(map_axis, day_range, extracolors='black')
+        float_axes = [plt.subplot(gs[1,i]) for i in range(self.n_floats)]
+        for i in range(len(self.floats)):
+            prof_indices = self.floats[i].profs_to_date(day_range[-1])
+            self.floats[i].axplot_isopycnal_bathymetry(float_axes[i], prof_indices)
+            float_axes[i].set_title(self.wmo_ids[i])
+        plt.suptitle("Latest day: "   + ap.format_jd(day_range[-1]))
+        plt.subplots_adjust(top=0.962,bottom=0.113,left=0.076,right=0.97,hspace=0.136,wspace=0.364)
+        # Save and close if desired
+        if saveas != None:
+            f.savefig(saveas)
+            plt.close(f)
+        else:
+            plt.show()
     
     
     def plot_isotherms_together(self, day_range=None, saveas=None, contour_levels=[ 1.52, 1.65, 1.82]):
@@ -250,8 +337,7 @@ class FloatComparer:
             plt.close(f)
         else:
             plt.show()
-            
-         
+               
     def plot_profiles_compare(self, day_range, saveas=None):
         """
         Mostly hardcoded plot routine for comparing potential temperature 
@@ -337,8 +423,6 @@ class FloatComparer:
         else:
             plt.show()
             
-         
-    
     def plot_isotherms_compare(self, day_range, saveas=None):
         """
         Mostly hardcoded plot routine for comparing isotherms between floats over 
@@ -426,11 +510,7 @@ class FloatComparer:
         else:
             plt.show()
             
-        
-        
-        
-    
-    def plot_params(self,  pres_min, pres_max, param1, param2='z', 
+    def plot_params(self, pres_min, pres_max, param1, param2='z', 
                    delta=True, day_range=None, saveas=None, plottype='average'):
         """
         Plot a given parameter's average value over a given depth range
@@ -621,8 +701,7 @@ class FloatComparer:
             for i in range(1, len(day_range)):
                 print('Plotting index', i, 'of', len(day_range))
                 self.plot_profiles_compare(day_range[:i+1], saveas=savedir+'profiles/f{:0>3d}.png'.format(i))
-                self.plot_isotherms_compare(day_range[:i+1], saveas=savedir+'isotherms/f{:0>3d}.png'.format(i))
-            
+                self.plot_isotherms_compare(day_range[:i+1], saveas=savedir+'isotherms/f{:0>3d}.png'.format(i))       
             
     def plot_over_time(self, pres_min, pres_max, param1, param2='z', delta=False,
                        savedir='/home/cassandra/docs/argo/movies/comparer/'):
@@ -642,19 +721,34 @@ class FloatComparer:
             self.plot_params(pres_min, pres_max, param1, param2 = param2, 
                              delta=delta, day_range = day_range[:i+1],
                              saveas = savedir+'f{:0>3d}.png'.format(i))
+                    
+    def bathymetry_over_time(self, savedir='/home/cassandra/docs/argo/movies/bathymetry/'):
+        """
+        
+        """
+        af.ensure_dir(savedir)
+        day_range = self.any_match_days()
+        day_range = np.linspace(min(day_range), max(day_range),
+                                26*(max(day_range) - min(day_range))/365, dtype=int)
+        for i in range(1, len(day_range)):
+            print('Plotting index', i, 'of', len(day_range))
+            self.plot_bathymetry_position(day_range = day_range[:i+1],
+                                          saveas = savedir+'f{:0>3d}.png'.format(i))
                            
         
             
             
 def main():
     wmo_ids = [4902326, 4902324, 4902323, 4902322, 4902321]
-    wmo_ids = [4902324, 4902323, 4902322]
+    wmo_ids = [4902326, 4902324, 4902323, 4902322, 4902321]
     
     comparer = FloatComparer(wmo_ids, 
                              argo_dir="/data/deep_argo_data/nc/",
                              aviso_dir = '/data/aviso_data/nrt/weekly/')
     
-    comparer.plot_isotherms_together()
+    #comparer.plot_isotherms_together()
+    #comparer.bathymetry_over_time()
+    comparer.plot_map_only()
     
     #comparer.comps_over_time()
     #comparer.plot_over_time( 0, 5500, 'pt', param2='SA')

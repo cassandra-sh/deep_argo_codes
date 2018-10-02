@@ -17,6 +17,7 @@ import matplotlib.patheffects as PathEffects
 import matplotlib.gridspec    as gridspec
 import matplotlib.colors
 import matplotlib
+import repeat_hydro
 import scipy.interpolate
 import matplotlib.pyplot   as plt
 import numpy               as np
@@ -24,6 +25,8 @@ import pandas              as pd
 import aviso_interp
 import argo_profile
 import glob
+import math
+import gsw
 import time
 import sys
 import gc
@@ -80,6 +83,15 @@ def ensure_dir(file_path):
 def num_only(string):
     return "".join(_ for _ in string if _ in "1234567890")
 
+def find_nearest(array,value):
+    idx = np.searchsorted(array, value, side="left")
+    if idx > 0 and (idx == len(array) or math.fabs(value - array[idx-1]) < math.fabs(value - array[idx])):
+        return idx-1
+    else:
+        return idx
+
+        
+    
 class ArgoFloat:
     """
     Contains all profiles for a given argo float, and an aviso interpolator
@@ -154,7 +166,11 @@ class ArgoFloat:
                                                                      bounds_error=False)
         self.lon_interp = scipy.interpolate.interp1d(self.julds, self.lons, fill_value=np.nan, bounds_error=False)
         self.lat_interp = scipy.interpolate.interp1d(self.julds, self.lats, fill_value=np.nan, bounds_error=False)
-    
+        
+        
+        # Step 4. Get repeat hydrography holder
+        self.rh = repeat_hydro.RepeatHydrography()
+
     def profs_to_date(self, day):
         """
         Get the profile indices for every profile up to the given day (in juld)
@@ -214,7 +230,7 @@ class ArgoFloat:
             z - power of other_param (units = squared (other_param unit) times days)
         """
         if n == None:
-            n = 10*len(self.julds)
+            n = len(self.julds)
         
         # 1. Generate the list of values for each day
         ovals_list = [self.iso_compute(iso_param, iso_value, other_param) for iso_value in iso_values]
@@ -306,8 +322,8 @@ class ArgoFloat:
         elif return_deltas:    return delta_pt, delta_SA
         # Otherwise integrate
         return np.trapz(integrand, x=int_depth)  # integrate over pressure
-        
     
+        
     """
     SOFTCODED PLOT ROUTINES
     """
@@ -324,9 +340,9 @@ class ArgoFloat:
         full_sterics = full_sterics - np.nanmean(full_sterics)#full_sterics[0]
         # Get colors for each bin
         depth_colors = []
-        cmap =  cm.get_cmap('PuBuGn')
+        cmap =  cm.get_cmap('winter')
         for j in range(1, len(depth_bins)):
-            depth_colors.append(cmap((j-1)/(len(depth_bins)-1)))
+            depth_colors.append(cmap((j-1)/(len(depth_bins)-2)))
         # Get the integrands (and depths) for each profile measured
         integrands, depths = [], []
         for i in prof_indices:
@@ -357,11 +373,14 @@ class ArgoFloat:
             # Make sure to adjust the sla to relative to first measurement
             axis.fill_between(dates, 0, sla - np.nanmean(sla),#[0], 
                               color=depth_colors[j-1], zorder=len(depth_bins)-j,
-                              label=('z between '+str(bin_min)+' and '+str(bin_max)))             
+                              label=('Steric with depth between '+str(bin_min)+' m and '+str(bin_max) + ' m'))             
         # Plot aviso sla on top, adding a legend
-        axis.plot(dates, aviso_sla, color='orange', label='Aviso sla')
-        axis.plot(dates, full_sterics, color='green', label='Full steric')
+        axis.plot(dates, aviso_sla, color='red', label='Aviso sla')
+        axis.plot(dates, full_sterics, color='black', label='Full steric')
         axis.legend()
+        axis.set_ylabel("Sea Level Anomaly (m)")
+        xticks = axis.get_xticks()
+        axis.set_xticklabels([argo_profile.format_jd(xt) for xt in xticks], rotation=90)
     
     def aviso_map_plot(self, date, axis, extracolors = 'black'):
         """
@@ -410,10 +429,10 @@ class ArgoFloat:
         #Transfer xvals back to frequency
         xvals = 1.0/xvals
         
-        lab = ('Average Periodigram for ' + argo_profile.attr_to_name(other_param) +
-               ' on lines of equal ' + argo_profile.attr_to_name(iso_param) + " for " +
-               argo_profile.attr_to_symb(iso_param) + r" $\in$ (" + str(min(iso_values)) +
-               ', ' + str(max(iso_values)) + ")")
+        lab = str('Average Periodigram for ' + argo_profile.attr_to_name(other_param) +
+                  ' on lines of equal ' + argo_profile.attr_to_name(iso_param) + " for " +
+                   argo_profile.attr_to_symb(iso_param) + r" $\in$ (" + str(min(iso_values)) +
+                  ', ' + str(max(iso_values)) + ")")
         
         power_values = np.nanmean(zvals, axis=1)
         power_errs = np.nanstd(zvals, axis=1)
@@ -648,9 +667,142 @@ class ArgoFloat:
         if ax_ylims is not None: axis.set_ylim(ax_ylims[0], ax_ylims[1])
         else:                    axis.set_ylim(np.nanmin(yvals), np.nanmax(yvals))
     
-    def axplot_iso_diffs(self, axis, prof_indices, param, pvals, **kwargs):
+    def calc_isopycnal_heave(self, n):
         """
         
+        """
+        prof_indices_all = range(len(self.profiles))
+        # Get pt values at different depths
+        pt_vals = np.interp(np.flip(self.depth_avg, 0), -1.0*self.profiles[n].z, 
+                             self.profiles[n].pt, left=np.nan, right=np.nan)
+        pt_vals_all = [np.interp(np.flip(self.depth_avg, 0), -1.0*self.profiles[i].z, 
+                             self.profiles[i].pt, left=np.nan, right=np.nan) for i in prof_indices_all]
+        # Derive some pt grid
+        pt_grid = np.linspace(np.nanmin(pt_vals), np.nanmax(pt_vals), 10000)
+        pt_grid_all = np.linspace(np.nanmin(pt_vals_all), np.nanmax(pt_vals), 10000)
+        # Project depth values onto it
+        pt_depths = np.interp(pt_grid, pt_vals, self.depth_avg, 
+                               left=np.nan, right=np.nan)
+        pt_depths_all = [np.interp(pt_grid_all, ptv, self.depth_avg, 
+                               left=np.nan, right=np.nan) for ptv in pt_vals_all]
+        # Get the average depth of each pt
+        pt_depth_averages = np.nanmean(pt_depths_all, axis=0)
+        # Turn the peculiar isopycnal depth value into heave values by subtracting the average depth
+        pt_heaves = pt_depths - pt_depth_averages
+        # Project this onto a depth grid to get peculiar isopycnal heave at each depth
+        depth_heaves = np.interp(self.depth_avg, pt_depth_averages, pt_heaves, left=np.nan, right=np.nan)
+        # These become the xvals and yvals
+        xvals = depth_heaves
+        yvals = np.flip(self.depth_avg, 0)
+        
+        return xvals, yvals
+        
+    def axplot_isopycnal_bathymetry(self, axis, prof_indices, **kwargs):
+        """
+        
+        """
+        # kwargs get
+        ax_xlims      = kwargs.get('ax_xlims'      ,     None)
+        ax_ylims      = kwargs.get('ax_ylims'      ,     None)
+        ax_xlabel     = kwargs.get('ax_xlabel'     ,     True)
+        ax_ylabel     = kwargs.get('ax_ylabel'     ,     True)
+        cbar          = kwargs.get('cbar'          ,     True)
+        type          = kwargs.get('type'          ,   'time')
+        to_ret = None
+        plt.sca(axis)
+        prof_indices_all = range(len(self.profiles))
+        
+        # Get pt values at different depths
+        pt_vals = [np.interp(np.flip(self.depth_avg, 0), -1.0*self.profiles[i].z, 
+                             self.profiles[i].pt, left=np.nan, right=np.nan) for i in prof_indices]
+        pt_vals_all = [np.interp(np.flip(self.depth_avg, 0), -1.0*self.profiles[i].z, 
+                             self.profiles[i].pt, left=np.nan, right=np.nan) for i in prof_indices_all]
+        # Derive some pt grid
+        pt_grid = np.linspace(np.nanmin(pt_vals), np.nanmax(pt_vals), 10000)
+        pt_grid_all = np.linspace(np.nanmin(pt_vals_all), np.nanmax(pt_vals), 10000)
+        # Project depth values onto it
+        pt_depths = [np.interp(pt_grid, ptv, self.depth_avg, 
+                               left=np.nan, right=np.nan) for ptv in pt_vals]
+        pt_depths_all = [np.interp(pt_grid_all, ptv, self.depth_avg, 
+                               left=np.nan, right=np.nan) for ptv in pt_vals_all]
+        # Get the average depth of each pt
+        pt_depth_averages = np.nanmean(pt_depths_all, axis=0)
+        # Turn the peculiar isopycnal depth value into heave values by subtracting the average depth
+        pt_heaves = [ptd - pt_depth_averages for ptd in pt_depths]
+        # Project this onto a depth grid to get peculiar isopycnal heave at each depth
+        depth_heaves = [np.interp(self.depth_avg, pt_depth_averages, pth,
+                                  left=np.nan, right=np.nan) for pth in pt_heaves]
+        # These become the xvals and yvals
+        xvals = depth_heaves
+        yvals = np.flip(self.depth_avg, 0)
+        
+        # Some kind of time is the z axis, and we are just color 
+        # coding the profiles by time of year or from latest to earliest
+        if type in ['seasonal', 'time', 'time_all']:
+            # Start by prepping a color list for the profiles, and a date list if necessary
+            colors   = []
+            day_list = []
+            # In the case of type = 'time', make profiles greyer the further back in time
+            if type == 'time': 
+                cmap = cm.get_cmap(kwargs.get('cmap', 'binary'))
+                norm = matplotlib.colors.PowerNorm(vmin=1, vmax=5, gamma=3.0, clip=True)
+                colors = [cmap(0.05+0.95*norm(i+1-len(prof_indices)+5)) for i in range(len(prof_indices))]
+            # In the case of 'time_all', use a 'jet' color scheme from earliest time to latest time
+            if type == 'time_all':
+                cmap = cm.get_cmap(kwargs.get('cmap', 'jet'))
+                colors = [cmap(i/(len(prof_indices)+1)) for i in range(len(prof_indices))]
+                day_list = [self.profiles[i].julian_day for i in prof_indices]
+            # Otherwise, make profiles a color based on the time of year
+            elif type == 'seasonal':
+                # Get datetimes from the julian days for the relevant profiles
+                datetimes = [pd.to_datetime(self.profiles[i].datetime) for i in prof_indices]
+                # Adjust to number of days since July 1 of each year
+                days_since_newyear = np.array([datetime.dayofyear for datetime in datetimes])
+                days_since_july    = days_since_newyear - 182
+                days_since_july[days_since_july<0] = days_since_july[days_since_july<0]+365
+                # Adjust to 0 to 1 scale
+                date_scale = (days_since_july / 365.0)# + 0.5
+                #date_scale[date_scale > 1.0] = date_scale[date_scale > 1.0] - 1.0
+                # Map onto colormap
+                cmap = cm.get_cmap(kwargs.get('cmap', 'hsv_r'))
+                colors = [cmap(ds) for ds in date_scale]
+            # Now scatter plot the profiles using that color scheme
+            for i in prof_indices:
+                axis.plot(xvals[i], yvals, color=colors[i])
+            # And make a colorbar if seasonal is used and colorbar is requested
+            if type == 'seasonal' or type == 'time_all':
+                sm = plt.cm.ScalarMappable(cmap=cmap)
+                sm._A = []
+                to_ret = sm
+                if cbar:
+                    if type == 'seasonal':
+                        cbar = plt.colorbar(sm, ticks=np.linspace(0, 1, num=13))
+                        cbar.ax.set_yticklabels(['July', 'August', 'September',
+                                                 'October',  'November', 'December',
+                                                 'January', 'February', 'March',
+                                                 'April', 'May', 'June', 'July'])
+                        cbar.set_label('Month', rotation=270)
+                    elif type == 'time_all':
+                        cbar = plt.colorbar(sm, ticks=np.linspace(0, 1, num=10))
+                        day_range = np.linspace(min(day_list), max(day_list), num=10)
+                        cbar.ax.set_yticklabels([argo_profile.format_jd(day) for day in day_range])
+        # Axis/Labels/Ticks/Limits formatting
+        axis.grid(True)
+        if ax_ylabel: axis.set_ylabel("Depth (m)")
+        if ax_xlabel: axis.set_xlabel("Isopycnal Heave (m)")
+        if ax_xlims is not None: axis.set_xlim(ax_xlims[0], ax_xlims[1])
+        else:                    axis.set_xlim(-200.0, 200.0)  
+        if ax_ylims is not None: axis.set_ylim(ax_ylims[0], ax_ylims[1])
+        else:                    axis.set_ylim(np.nanmin(yvals), np.nanmax(yvals))
+        axis.invert_yaxis()
+        return to_ret
+        
+    def axplot_iso_diffs(self, axis, prof_indices, param, pvals, **kwargs):
+        """
+        Basically take some param and some levels of that param to look at the
+        depth change of said param levels over time.
+        
+        Basically for looking at isopycnal heave over time
         """
         # kwargs get
         ax_xlims      = kwargs.get('ax_xlims'      ,     None)
@@ -660,7 +812,6 @@ class ArgoFloat:
         ax_xticklabel = kwargs.get('ax_xticklabel' ,     True)
         cbar          = kwargs.get('cbar'          ,     True)
         cval          = kwargs.get('cval'          ,  'param')
-        
             
         # Get time values (xvals) for x axis
         xvals = np.array([self.julds[i] for i in prof_indices])
@@ -826,18 +977,45 @@ class ArgoFloat:
                                       np.nanmin(yvals), np.nanmax(yvals)],
                               vmin=kwargs.get('vmin', None),
                               vmax=kwargs.get('vmax', None))
-            clabels = plt.clabel(cs, inline=True, fontsize=10, color='white')
+            #clabels = plt.clabel(cs, inline=True, fontsize=12, color='black')
+            
+            # get limits if they're automatic
+            xmin,xmax,ymin,ymax = plt.axis()
+            # work with logarithms for loglog scale
+            # middle of the figure:
+            mid = (xmin+xmax)/2, (ymin+ymax)/2
+            
+            label_pos = []
+            for line in cs.collections:
+                for path in line.get_paths():
+                    vert = path.vertices
+            
+                    # find closest point
+                    dist = np.linalg.norm(vert-mid, ord=2, axis=1)
+                    min_ind = np.argmin(dist)
+                    label_pos.append(vert[min_ind,:])
+            
+            # draw labels, hope for the best
+            clabels = axis.clabel(cs, inline=True, inline_spacing=3, rightside_up=True, colors='black',
+                                  fontsize=14, manual=label_pos)
+
             
             for l in clabels:
                 l.set_rotation(0)
-                l.set_path_effects([PathEffects.withStroke(linewidth=2, foreground='k')])
+                l.set_path_effects([PathEffects.withStroke(linewidth=3, foreground='w')])
+                #l.set_path_effects([PathEffects.SimpleLineShadow(shadow_color='white'), PathEffects.Normal()])
+                #l.set_path_effects([PathEffects.Stroke(linewidth=1, foreground='white'), PathEffects.Normal()])
             to_ret = (ct, cs)
             
             # If no axis lims given, adjust axis to center on data
             if ax_xlims is None:
-                axis.set_xlim(np.nanmin(xvals), np.nanmax(xvals))    
+                axis.set_xlim(np.nanmin(xvals), np.nanmax(xvals)) 
+                xmin,xmax,ymin,ymax = plt.axis()   
+                xspan = xmax-xmin
+                axis.set_xlim(xmax - 1.02*xspan, xmax)
             if ax_ylims is None:
                 axis.set_ylim(np.nanmin(yvals), np.nanmax(yvals))
+            
             
             # Add colorbar if preferred
             if cbar:
@@ -933,6 +1111,84 @@ class ArgoFloat:
     """
     HARDCODED PLOT ROUTINES
     """
+    
+    def isopycnal_heave_comparison(self, prof_index='latest', saveas=None):
+        """
+        
+        """
+        # Step 0. Get information about the desired profile index
+        if prof_index == 'latest':
+            prof_index = -1
+        lon = self.lons[prof_index]
+        if lon < 0:
+            lon = lon + 360
+        
+        # Step 1. Get the repeat hydrography profiles
+        pt_grid, rh_pt_zvals = self.rh.get_hydro_isopycnal_heights(lon, pt_grid=None)
+        
+              
+        # Step 2. Get the float's information on isopycnal heights for the given index
+        zgrid = np.arange(-6000.0, 0.0, 1.0)
+        ptvals = np.interp(zgrid, np.flip(self.profiles[prof_index].z, 0),
+                           np.flip(self.profiles[prof_index].pt, 0), left=np.nan, right=np.nan)
+        pt_zvals = np.interp(pt_grid, ptvals, zgrid, left=np.nan, right=np.nan)
+        
+        
+        # Step 3. Combine for the float's observed isopycnal heave
+        # Step 3.a. Get the heave of the isopycnals, taking repeat hydrography as average or base
+        heave = np.abs(pt_zvals) - np.abs(rh_pt_zvals)
+        # Step 3.b. Interpolate onto a depth grid
+        zheave = np.interp(zgrid, rh_pt_zvals, heave)
+        
+        
+        # Step 4. Use gridspect to define axes
+        matplotlib.rcParams.update(matplotlib.rcParamsDefault)
+        rc('text', usetex=True)
+        rc('font', family='serif', size=18)
+        f = plt.figure(1, figsize=(11,8))
+        gs = gridspec.GridSpec(3, 3, figure=f)
+        plt.suptitle("Float WMO\_ID: " + str(self.WMO_ID) + ", " +
+                     "Day: "   + argo_profile.format_jd(self.julds[prof_index]))
+        rh_axis = f.add_subplot(gs[0:2,0:2])
+        position_axis = f.add_subplot(gs[2,0:2], sharex=rh_axis)
+        heave_axis = f.add_subplot(gs[0:2,2], sharey=rh_axis)
+        
+        
+        # Step 5. Plot the repeat hydrography isopycnals
+        self.rh.axplot_isopycnals(rh_axis)
+        rh_axis.set_ylim(0.0, 6000.0)
+        rh_axis.set_xlim(280, 345)
+        rh_axis.invert_yaxis()
+        
+        
+        # Step 6. Plot the float's location over time
+        position_axis.plot(np.array(self.lons)+360.0, self.julds, color='black')
+        position_axis.yaxis.tick_right()
+        yticks = position_axis.get_yticks()
+        yticklabels = [argo_profile.format_jd(ytick) for ytick in yticks]
+        position_axis.set_yticklabels(yticklabels)
+        position_axis.axhline(self.julds[prof_index], color='red')
+        position_axis.invert_yaxis()
+        position_axis.set_xlabel("Float Position Longitude (degrees)")
+        
+        
+        # Step 7. Plot the float's observed isopycnal heave
+        heave_axis.plot(zheave, -1.0*zgrid)
+        heave_axis.set_xlabel("Isopycnal Heave (m)")
+        heave_axis.set_ylabel("Depth (m)")
+        heave_axis.grid(True)
+        
+        
+        # Step 8. Fix labels and such and show      
+        plt.subplots_adjust(top=0.926,bottom=0.106,left=0.106,right=0.95,hspace=0.427,wspace=0.454)
+        
+        # Save and close if desired
+        if saveas != None:
+            f.savefig(saveas)
+            plt.close(f)
+        else: plt.show()
+    
+    
     def plot_isotherm_power_spectrum_avg(self, prof_indices='all',
                                          saveas=None, pt_range=None):
         # figure out prof nums
@@ -978,9 +1234,9 @@ class ArgoFloat:
         else:               plt.ion()
         
         # Format plot text
+        matplotlib.rcParams.update(matplotlib.rcParamsDefault)
         rc('text', usetex=True)
-        rc('font', family='serif')
-        plt.style.use('dark_background')
+        rc('font', family='serif', size=18)
     
         # Get figure and axes, label with WMO_id and latest date
         f = plt.figure(figsize=(13,8))
@@ -1131,7 +1387,7 @@ class ArgoFloat:
         else:
             plt.show()
     
-    def plot_isotherms(self, contour_levels=np.arange(1.5, 1.901, .02),
+    def plot_isotherms(self, contour_levels=np.arange(1.5, 1.901, .025),
                        prof_indices='all', saveas=None):
         """
         
@@ -1144,9 +1400,9 @@ class ArgoFloat:
         else:               plt.ion()
     
         # Format plot text
+        matplotlib.rcParams.update(matplotlib.rcParamsDefault)
         rc('text', usetex=True)
-        rc('font', family='serif')
-        plt.style.use('dark_background')
+        rc('font', family='serif', size=18)
         
         # Get figure and axes, label with WMO_id and latest date
         f = plt.figure(figsize=(13,8))
@@ -1156,8 +1412,17 @@ class ArgoFloat:
         plt.subplots_adjust(top=0.88,bottom=0.185,left=0.065,right=0.95,hspace=0.2,wspace=0.2)
         self.axplot_prof(axis, prof_indices, 'isotherms', 'time', 'z',
                          contour_levels=contour_levels, cbar=False)
-        axis.set_ylim(-5800, -4200)
-    
+        axis.set_ylim(-5400, -4200)
+        
+        # Given the axis, increase the resolution of the x ticks and associated labels
+        xmin, xmax = axis.get_xlim()
+        xticks = np.linspace(xmin, xmax, 10)
+        xticklabels = [argo_profile.format_jd(xtick) for xtick in xticks]
+        axis.set_xticks(xticks)
+        axis.set_xticklabels(xticklabels)
+        
+        plt.subplots_adjust(top=0.92,bottom=0.28,left=0.1,right=0.95,hspace=0.2,wspace=0.2)
+        
         # Save and close if desired
         if saveas != None:
             f.savefig(saveas)
@@ -1207,8 +1472,42 @@ class ArgoFloat:
             f.savefig(saveas)
             plt.close(f)
         else:
-            plt.show()
-        
+            plt.show()   
+            
+    def plot_isopycnal_bathymetry(self, prof_indices='all', saveas=None):
+        """
+         
+        """
+        # figure out prof nums
+        if prof_indices == 'all': prof_indices = list(range(len(self.profiles)))
+        # Plan not to display if saving
+        if saveas != None:  plt.ioff()
+        else:               plt.ion()
+        # Format plot text
+        matplotlib.rcParams.update(matplotlib.rcParamsDefault)
+        rc('text', usetex=True)
+        rc('font', family='serif', size=18)
+        #matplotlib.rcParams.update({'font.size': 22})
+        # Get figure and axes, label with WMO_id and latest date
+        f = plt.figure(figsize=(8,6))
+        axis = plt.subplot()
+        plt.suptitle("Float WMO\_ID: " + str(self.WMO_ID) + ", " +
+                     "Latest day: "   + argo_profile.format_jd(self.julds[prof_indices[-1]]))
+        plt.tight_layout()
+        f.subplots_adjust(top=0.915,
+                          bottom=0.15,
+                          left=0.141,
+                          right=0.945,
+                          hspace=0.2,
+                          wspace=0.15)
+        self.axplot_isopycnal_bathymetry(axis, prof_indices)
+        # Save and close if desired
+        if saveas != None:
+            f.savefig(saveas)
+            plt.close(f)
+        else:
+            plt.show()            
+  
     def plot_pt_sa_time_all(self, prof_indices='all', saveas=None):
         """
          
@@ -1221,9 +1520,9 @@ class ArgoFloat:
         else:               plt.ion()
             
         # Format plot text
+        matplotlib.rcParams.update(matplotlib.rcParamsDefault)
         rc('text', usetex=True)
-        rc('font', family='serif')
-        plt.style.use('dark_background')
+        rc('font', family='serif', size=18)
         
         # Get figure and axes, label with WMO_id and latest date
         f = plt.figure(figsize=(13,8))
@@ -1233,13 +1532,15 @@ class ArgoFloat:
         plt.suptitle("Float WMO\_ID: " + str(self.WMO_ID) + ", " +
                      "Latest day: "   + argo_profile.format_jd(self.julds[prof_indices[-1]]))
         plt.tight_layout()
-        f.subplots_adjust(top=0.95,bottom=0.07,left=0.08, right=0.920,wspace=0.15)
+        #f.subplots_adjust(top=0.95,bottom=0.07,left=0.08, right=0.920,wspace=0.15)
         self.axplot_prof(pt_ax, prof_indices, 'time_all', 'pt', 'z',
                          cbar=False, deltax=True, ax_ylims = [-6000, -4000],
                          ax_xlims=[-.1, .1])
         self.axplot_prof(SA_ax, prof_indices, 'time_all', 'SA', 'z',
                          cbar=True, deltax=True, ax_ylims = [-6000, -4000],
                          ax_xlims=[-.01, .01])
+        
+        f.subplots_adjust(top=0.92,bottom=0.098,left=0.098,right=0.853,hspace=0.2,wspace=0.28)
         
         # Save and close if desired
         if saveas != None:
@@ -1283,8 +1584,9 @@ class ArgoFloat:
         
         
         # Make formatted strings for axis labels
+        matplotlib.rcParams.update(matplotlib.rcParamsDefault)
         rc('text', usetex=True)
-        rc('font', family='serif')
+        rc('font', family='serif', size=18)
         #steric_int_label = r"Steric Integrand ($\alpha \Delta T_{\textrm{potential}}}-\beta \Delta S_{{\textrm{absolute anomaly}}}$)"
         steric_int_label = 'Steric Integrand'
 
@@ -1295,89 +1597,96 @@ class ArgoFloat:
 
         # Get figure and axes, label with WMO_id and latest date
         f = plt.figure(figsize=(13,8))
-        gs = gridspec.GridSpec(6, 9, figure=f, wspace=0.9, hspace=0.6)
-        map_ax = plt.subplot(gs[ :-3   ,  0:2])
-        SLA_ax = plt.subplot(gs[3:     ,  0:2])
-        top_integrand_ax = plt.subplot(gs[0:2  ,  2:5])
-        mid_integrand_ax = plt.subplot(gs[2:4  ,  2:5])
-        low_integrand_ax = plt.subplot(gs[4:6  ,  2:5])
-        upper_PT_ax = plt.subplot(gs[0:2   ,  5:7])
-        lower_PT_ax = plt.subplot(gs[2:    ,  5:7])
-        upper_PSA_ax = plt.subplot(gs[0:2   ,  7:9])
-        lower_PSA_ax = plt.subplot(gs[2:    ,  7:9])
+        # gs = gridspec.GridSpec(6, 9, figure=f, wspace=0.9, hspace=0.6)
+        gs = gridspec.GridSpec(3, 2, figure=f, wspace=0.25, hspace=0.2)
+        # map_ax = plt.subplot(gs[ :-3   ,  0:2])
+        # SLA_ax = plt.subplot(gs[3:     ,  0:2])
+        # top_integrand_ax = plt.subplot(gs[0:2  ,  2:5])
+        # mid_integrand_ax = plt.subplot(gs[2:4  ,  2:5])
+        # low_integrand_ax = plt.subplot(gs[4:6  ,  2:5])
+        # upper_PT_ax = plt.subplot(gs[0:2   ,  5:7])
+        # lower_PT_ax = plt.subplot(gs[2:    ,  5:7])
+        # upper_PSA_ax = plt.subplot(gs[0:2   ,  7:9])
+        # lower_PSA_ax = plt.subplot(gs[2:    ,  7:9])
+        upper_PT_ax = plt.subplot(gs[0 ,  0])
+        lower_PT_ax = plt.subplot(gs[1: ,  0])
+        upper_PSA_ax = plt.subplot(gs[0  ,  1])
+        lower_PSA_ax = plt.subplot(gs[1:    ,  1])
         
         # Plot all axis labels, adjust size and shape for ~ok~ saved formatting
         plt.suptitle("Float WMO\_ID: " + str(self.WMO_ID) + ", " +
-                     "Latest day: "   + argo_profile.format_jd(self.julds[prof_indices[-1]]))
-        SLA_ax.set_xlabel('Date')
-        SLA_ax.set_ylabel("Relative Sea Level Anomaly (m)")
-        low_integrand_ax.set_xlabel(steric_int_label)
-        mid_integrand_ax.set_ylabel("Depth (m)")
-        lower_PT_ax.set_xlabel("In-situ temperature (C)")
+                     "Day: "   + argo_profile.format_jd(self.julds[prof_indices[-1]]))
+        # SLA_ax.set_xlabel('Date')
+        # SLA_ax.set_ylabel("Relative Sea Level Anomaly (m)")
+        # low_integrand_ax.set_xlabel(steric_int_label)
+        # mid_integrand_ax.set_ylabel("Depth (m)")
+        lower_PT_ax.set_xlabel("Potential temperature (C)")
         lower_PT_ax.set_ylabel("Pressure (dbar)")
         lower_PSA_ax.set_xlabel("Absolute Salinity (g/kg)")
         lower_PSA_ax.set_ylabel("Pressure (dbar)")
+        #plt.tight_layout()
+        #plt.subplots_adjust(bottom=0.2, left=0.1, top=0.92)
         plt.tight_layout()
-        plt.subplots_adjust(bottom=0.2, left=0.1, top=0.92)
+        plt.subplots_adjust(top=0.92)
 
-        # MAP axis : Location over time
-        map = self.aviso_map_plot(days[-1], map_ax)              # Plot the interpolated SLA values
-        x, y = map(lons, lats)                                   # Get map float locations
-        map.plot(x,y, label='Float location', color='black')     # Plot float locations
+        # # MAP axis : Location over time
+        # map = self.aviso_map_plot(days[-1], map_ax)              # Plot the interpolated SLA values
+        # x, y = map(lons, lats)                                   # Get map float locations
+        # map.plot(x,y, label='Float location', color='black')     # Plot float locations
 
-        # SLA_ax : Float Sea Level Anomaly vs. Time
-        SLA_ax.plot(days, aviso_sla,  label='Aviso')             # Plot the aviso SLA
-        SLA_ax.plot(days, steric_sla, label='Steric')            # Plot the steric SLA
-        xticks = SLA_ax.get_xticks()                             # Get the automatic xticks
-        form = [argo_profile.format_jd(xt) for xt in xticks]     # Convert into formatted dates
-        SLA_ax.set_xticklabels(form, rotation=90)                # Use dates as tick labels
-        SLA_ax.grid(True)                                        # Add grid
-        SLA_ax.legend(loc='lower right')                         # Add legend
+        # # SLA_ax : Float Sea Level Anomaly vs. Time
+        # SLA_ax.plot(days, aviso_sla,  label='Aviso')             # Plot the aviso SLA
+        # SLA_ax.plot(days, steric_sla, label='Steric')            # Plot the steric SLA
+        # xticks = SLA_ax.get_xticks()                             # Get the automatic xticks
+        # form = [argo_profile.format_jd(xt) for xt in xticks]     # Convert into formatted dates
+        # SLA_ax.set_xticklabels(form, rotation=90)                # Use dates as tick labels
+        # SLA_ax.grid(True)                                        # Add grid
+        # SLA_ax.legend(loc='lower right')                         # Add legend
 
-        # AXIS : Integrand axes
-        # top_integrand_ax
-        top_integrand_ax.axvline( .0002, color='crimson')
-        top_integrand_ax.axvline(-.0002, color='crimson')
-        for i in prof_indices:
-            # Get the x and y values of the integrand and plot
-            int_depth, integrand = self.steric_sla(i, return_integrand=True)  
-            top_integrand_ax.plot(integrand, int_depth, color=colors[i])
-        top_integrand_ax.invert_yaxis()
-        top_integrand_ax.grid(True)
-        top_integrand_ax.set_ylim([500, 0])
-        plt.sca(top_integrand_ax)
-        plt.xticks(rotation=20)
-        # mid_integrand_ax
-        mid_integrand_ax.axvline( .000025, color='crimson')
-        mid_integrand_ax.axvline(-.000025, color='crimson')
-        for i in prof_indices:
-            # Get the x and y values of the integrand and plot
-            int_depth, integrand = self.steric_sla(i, return_integrand=True)  
-            mid_integrand_ax.plot(integrand, int_depth, color=colors[i])
-        mid_integrand_ax.invert_yaxis()
-        mid_integrand_ax.grid(True)
-        mid_integrand_ax.set_ylim([2000,     500])
-        mid_integrand_ax.set_xlim([ -.0002, .0002])
-        plt.sca(mid_integrand_ax)
-        plt.xticks(rotation=20)
-        # low_integrand_ax
-        for i in prof_indices:
-            # Get the x and y values of the integrand and plot
-            int_depth, integrand = self.steric_sla(i, return_integrand=True)  
-            low_integrand_ax.plot(integrand, int_depth, color=colors[i])
-        low_integrand_ax.invert_yaxis()
-        low_integrand_ax.grid(True)
-        low_integrand_ax.set_ylim([6000, 2000])
-        low_integrand_ax.set_xlim([ -.000025, .000025])
-        plt.sca(low_integrand_ax)
-        plt.xticks(rotation=20)
+        # # AXIS : Integrand axes
+        # # top_integrand_ax
+        # top_integrand_ax.axvline( .0002, color='crimson')
+        # top_integrand_ax.axvline(-.0002, color='crimson')
+        # for i in prof_indices:
+        #     # Get the x and y values of the integrand and plot
+        #     int_depth, integrand = self.steric_sla(i, return_integrand=True)  
+        #     top_integrand_ax.plot(integrand, int_depth, color=colors[i])
+        # top_integrand_ax.invert_yaxis()
+        # top_integrand_ax.grid(True)
+        # top_integrand_ax.set_ylim([500, 0])
+        # plt.sca(top_integrand_ax)
+        # plt.xticks(rotation=20)
+        # # mid_integrand_ax
+        # mid_integrand_ax.axvline( .000025, color='crimson')
+        # mid_integrand_ax.axvline(-.000025, color='crimson')
+        # for i in prof_indices:
+        #     # Get the x and y values of the integrand and plot
+        #     int_depth, integrand = self.steric_sla(i, return_integrand=True)  
+        #     mid_integrand_ax.plot(integrand, int_depth, color=colors[i])
+        # mid_integrand_ax.invert_yaxis()
+        # mid_integrand_ax.grid(True)
+        # mid_integrand_ax.set_ylim([2000,     500])
+        # mid_integrand_ax.set_xlim([ -.0002, .0002])
+        # plt.sca(mid_integrand_ax)
+        # plt.xticks(rotation=20)
+        # # low_integrand_ax
+        # for i in prof_indices:
+        #     # Get the x and y values of the integrand and plot
+        #     int_depth, integrand = self.steric_sla(i, return_integrand=True)  
+        #     low_integrand_ax.plot(integrand, int_depth, color=colors[i])
+        # low_integrand_ax.invert_yaxis()
+        # low_integrand_ax.grid(True)
+        # low_integrand_ax.set_ylim([6000, 2000])
+        # low_integrand_ax.set_xlim([ -.000025, .000025])
+        # plt.sca(low_integrand_ax)
+        # plt.xticks(rotation=20)
         
         # AXIS: Pressure vs. Temperature
         # AXIS : upper_PT_ax : Pressure vs. Temperature for floats [low res]
         upper_PT_ax.axvline(1, color='crimson')
         upper_PT_ax.axvline(4, color='crimson')
         for i in prof_indices:
-            upper_PT_ax.scatter(self.profiles[i].temperature,         # Plot the P/T profiles
+            upper_PT_ax.scatter(self.profiles[i].pt,         # Plot the P/T profiles
                         self.profiles[i].pressure, s=1, color=colors[i])
         upper_PT_ax.invert_yaxis()                                    # Invert pressure axis to descending
         upper_PT_ax.grid(True)                                        # Add grid
@@ -1385,7 +1694,7 @@ class ArgoFloat:
         upper_PT_ax.yaxis.tick_right()
         # AXIS : lower_PT_ax : Pressure vs. Temperature for floats [high res]
         for i in prof_indices:
-            lower_PT_ax.scatter(self.profiles[i].temperature,         # Plot the P/T profiles
+            lower_PT_ax.scatter(self.profiles[i].pt,         # Plot the P/T profiles
                         self.profiles[i].pressure, s=1, color=colors[i])    
         lower_PT_ax.invert_yaxis()                                    # Invert pressure axis to descending
         lower_PT_ax.grid(True)                                        # Add grid
@@ -1396,8 +1705,8 @@ class ArgoFloat:
         
         # AXIS: Pressure versus Absolute Salinity
         # AXIS : upper_PSA_ax : Pressure vs. absolute salinity for floats [low res]
-        upper_PSA_ax.axvline(34.666, color='crimson')
-        upper_PSA_ax.axvline(35.333, color='crimson')
+        upper_PSA_ax.axvline(35.000, color='crimson')
+        upper_PSA_ax.axvline(35.200, color='crimson')
         for i in prof_indices:
             upper_PSA_ax.scatter(self.profiles[i].SA,         # Plot the P/T profiles
                                 self.profiles[i].pressure, s=1, color=colors[i])
@@ -1412,7 +1721,7 @@ class ArgoFloat:
         lower_PSA_ax.invert_yaxis()                                    # Invert pressure axis to descending
         lower_PSA_ax.grid(True)                                        # Add grid
         lower_PSA_ax.set_ylim([6000, 2000])                            # Zoom in on deep part
-        lower_PSA_ax.set_xlim([34.666, 35.333])                          # Increase resolution
+        lower_PSA_ax.set_xlim([35.000, 35.200])                          # Increase resolution
         lower_PSA_ax.yaxis.tick_right()
         lower_PSA_ax.yaxis.set_label_position("right")
         
@@ -1630,9 +1939,9 @@ class ArgoFloat:
         days       = [self.julds[i]                     for i in prof_indices]
     
         # Format plot text
+        matplotlib.rcParams.update(matplotlib.rcParamsDefault)
         rc('text', usetex=True)
-        rc('font', family='serif')
-        plt.style.use('dark_background')
+        rc('font', family='serif', size=18)
         
         # Get figure and axes, label with WMO_id and latest date
         f = plt.figure(figsize=(13,8))
@@ -1717,7 +2026,7 @@ class ArgoFloat:
             plt.close(f)
         else:
             plt.show()             
-
+    
     def plot_profile_with_contour_latest_interactive(self):
         """
         as plot_profiles_with_contours but plot all indices and display interactive.
@@ -1770,7 +2079,6 @@ class ArgoFloat:
         
         plt.show()
         
-        
     """
     SERIES PLOTTING FUNCTIONS
     """
@@ -1794,9 +2102,10 @@ class ArgoFloat:
             self.plot_profiles(prof_indices = indices[:i+1],
                                saveas       = savedir+'f{:0>3d}.png'.format(i))
     
-    def plot_profs(self, deltas = False, contours = False, pt_sa = False, pt_vs_sa = False,
+    def plot_profs(self, deltas = False, contours = False, pt_sa = False, 
+                   pt_vs_sa = False, bathymetry=False, isopycnals = False,
                    savedir='/home/cassandra/docs/argo/movies/float/rel_weekly/',
-                   WMO_ID_dir=True, endplot=True):
+                   WMO_ID_dir=True, endplot=False):
         """
         Plot all the profiles which have aviso data overlap
         """
@@ -1805,6 +2114,8 @@ class ArgoFloat:
         elif contours: savedir = savedir[:-1]+'_contours/'
         elif    pt_sa: savedir = savedir[:-1]+'_pt_sa/'
         elif pt_vs_sa: savedir = savedir[:-1]+'_pt_vs_sa/'
+        elif bathymetry: savedir = savedir[:-1]+'_bathymetry/'
+        elif isopycnals: savedir = savedir[:-1]+'_isopycnals/'
         else:          savedir = savedir[:-1]+'_default/'
         # If float_num_dir, modify savedir for the float number
         if WMO_ID_dir: savedir = savedir+str(self.WMO_ID)+'/'
@@ -1841,6 +2152,12 @@ class ArgoFloat:
             elif pt_vs_sa:
                 self.plot_pt_vs_SA(prof_indices = indices_to_use, 
                                    saveas       = (savedir+'f{:0>3d}.png'.format(i)))
+            elif bathymetry:
+                self.plot_isopycnal_bathymetry(prof_indices = indices_to_use, 
+                                               saveas       = (savedir+'f{:0>3d}.png'.format(i)))
+            elif isopycnals:
+                self.isopycnal_heave_comparison(prof_index = indices_to_use[-1], 
+                                               saveas       = (savedir+'f{:0>3d}.png'.format(i)))
             else:
                 self.plot_profiles(prof_indices = indices_to_use, 
                                    saveas       = (savedir+'f{:0>3d}.png'.format(i)))
@@ -1853,6 +2170,10 @@ class ArgoFloat:
                 self.plot_pt_sa_time_all()
             elif pt_vs_sa:
                 self.plot_pt_vs_SA()
+            elif bathymetry:
+                self.plot_isopycnal_bathymetry()
+            elif isopycnals:
+                self.isopycnal_heave_comparison()
             else:
                 self.plot_profiles()
 
@@ -1864,7 +2185,7 @@ def main():
     Make movies for every deep argo float in the northwest atlantic
     """    
     start_time = time.time()
-    for WMO_ID in  [4902322, 4902323, 4902324]: #[4902321, 4902322, 4902323, 4902324, 4902325, 4902326]:
+    for WMO_ID in  [4902321, 4902322, 4902323, 4902324, 4902325, 4902326]:
         
         print("Plotting float with WMO-ID " + str(WMO_ID))
         print("Time is " + str(int((time.time()-start_time)/60)) + " minutes.")
@@ -1877,7 +2198,9 @@ def main():
                               aviso_dir = '/data/aviso_data/nrt/weekly/')
         #af_weekly.plot_depthvals()
         #af_weekly.plot_pt_vs_SA()
-        #af_weekly.plot_profs(pt_sa=True)
+        #af_weekly.plot_profs(pt_sa=True, endplot=True)
+        #af_weekly.plot_isotherms()
+        #af_weekly.plot_profs(contours=True, endplot=True)
         #af_weekly.plot_iso_depths()
         #af_weekly.plot_profs(pt_vs_sa=True)
         #af_weekly.plot_profile_with_contour_latest_interactive()
@@ -1885,7 +2208,11 @@ def main():
         #af_weekly.plot_isotherms_collapsed()
         #af_weekly.plot_waterfall()
         #af_weekly.plot_steric_by_depth()
-        af_weekly.plot_isotherm_power_spectrum_avg()
+        #af_weekly.plot_isotherm_power_spectrum_avg()
+        #af_weekly.plot_isopycnal_bathymetry()
+        #af_weekly.plot_profs()
+        #af_weekly.isopycnal_heave_comparison()
+        af_weekly.plot_profs(isopycnals=True)
         gc.collect()
         
         #
@@ -1898,4 +2225,4 @@ def main():
         
         
 if __name__ == '__main__':
-    main()
+    af_weekly = main()

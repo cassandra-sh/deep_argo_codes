@@ -8,6 +8,7 @@ Created on Wed Jul 11 13:31:14 2018
 import os
 import gsw
 import sys
+import math
 import glob
 import astropy.time
 import pandas as pd
@@ -19,6 +20,9 @@ import matplotlib
 import which_ocean
 import scipy
 import aviso_interp
+import scipy.io
+from scipy import signal
+from scipy.misc import derivative
 
 REF_TIME = astropy.time.Time('1950-01-01')
 
@@ -94,11 +98,12 @@ class Profile:
             longitude
         """
         
-        self.gen_attrlist = ['SA', 'C', 'pt', 'CT', 'C_adj', 'beta', 'alpha',
-                             'alpha_on_beta', 'SR', 'z', 'integrand']
+        self.gen_attrlist = ['SA', 'C', 'pt', 'CT', 'C_adj', 'alpha', 'beta',
+                             'alpha_on_beta', 'SR', 'z', 'integrand', 'Nsquared']
         self.list_attrlist = ['pressure', 'psal', 'temperature']
         self.single_attrlist = ['observation_number', 'float_number',
                                 'datetime', 'julian_day','latitude', 'longitude']
+        self.gen_single_attrlist = ['f', 'betaf']
         
         #
         # Get parameters out of kwargs
@@ -210,6 +215,12 @@ class Profile:
             else:
                 getattr(self, 'get_'+attr)()
     
+        for attr in self.gen_single_attrlist:
+            if hasattr(self, attr):
+                pass
+            else:
+                getattr(self, 'get_'+attr)()
+                
     def make_interps(self):
         """
         Generate interpolators for every possible inferrable value
@@ -264,8 +275,6 @@ class Profile:
         """
         return format_jd(self.get_julian_day())
     
-    
-    
     def get_C(self):
         """
         Get the conductivity
@@ -274,6 +283,19 @@ class Profile:
                                            self.temperature,
                                            self.pressure)
         return self.C
+    
+    def get_Nsquared(self):
+        """
+        
+        """
+        for attr in ['CT', 'SA']:
+            if not hasattr(self, attr):
+                getattr(self, 'get_'+attr)()
+        nsq_vals, nsq_pres =  gsw.stability.Nsquared(self.SA, self.CT, 
+                                                     self.pressure,
+                                                     lat=self.latitude)
+        self.Nsquared = np.interp(self.pressure, nsq_pres, nsq_vals)
+        return self.Nsquared
     
     def get_integrand(self):
         """
@@ -345,6 +367,21 @@ class Profile:
             
         self.alpha_on_beta = gsw.alpha_on_beta(self.SA, self.CT, self.pressure)
         return self.alpha_on_beta
+    
+    def get_f(self):
+        """
+        get the coriolis parameter
+        """
+        self.f = gsw.geostrophy.f(self.latitude)
+        return self.f
+    
+    
+    def get_betaf(self):
+        """
+        Get beta, the derivative of the coriolis parameter with regards to latitude
+        """
+        self.betaf = derivative(gsw.geostrophy.f, self.latitude)
+        return self.betaf
     
     def get_beta(self):
         """

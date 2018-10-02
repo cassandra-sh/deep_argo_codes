@@ -24,7 +24,6 @@ def nc_interp(file, col, **kwargs):
     with xr.open_dataset(file) as xf:
         return xf.interp(**kwargs)[col]
 
-
 def datetime_to_argo_juld(date):
     """
     Take a numpy datetime64 object and calculate the argo julian day style
@@ -92,7 +91,6 @@ def dims_to_points(*dims):
     for mm in np.meshgrid(*dims):
         points.append(mm.flatten())
     return np.array(points).T
-
 
 def dropnan(points, vals):
     good = np.where(np.logical_not(np.isnan(vals)))[0]
@@ -201,14 +199,12 @@ class AvisoInterpolator:
             obj = open(self.aviso_dir+"interp.pickle", 'wb')
             pickle.dump(self.interp, obj)
         
-        
     def interpolate(self, *args):
         if self.irregular:
             return self.interp(*args)
         else:
             return self.interp(tuple(args))
         
-    
     def interp_sla(self, date, lon, lat):
         """
         
